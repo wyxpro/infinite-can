@@ -7,6 +7,10 @@ type SettingKey string
 const (
 	SettingKeyPublic  SettingKey = "public"
 	SettingKeyPrivate SettingKey = "private"
+	SettingKeyAgentSkillsInitialized SettingKey = "agent-skills-initialized"
+
+	StorageProviderTypeS3     = "s3"
+	StorageProviderTypeWebDAV = "webdav"
 )
 
 // ModelChannel 模型渠道配置。
@@ -53,14 +57,15 @@ type SystemPromptSetting struct {
 }
 
 type PublicModelChannelInfo struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	BaseURL string   `json:"baseUrl"`
-	Models  []string `json:"models"`
-	Weight  int      `json:"weight"`
-	Timeout int      `json:"timeout"`
-	Enabled bool     `json:"enabled"`
-	Remark  string   `json:"remark"`
+	ID       string   `json:"id"`
+	Protocol string   `json:"protocol"`
+	Name     string   `json:"name"`
+	BaseURL  string   `json:"baseUrl"`
+	Models   []string `json:"models"`
+	Weight   int      `json:"weight"`
+	Timeout  int      `json:"timeout"`
+	Enabled  bool     `json:"enabled"`
+	Remark   string   `json:"remark"`
 }
 
 // PublicSetting 公开配置。
@@ -74,6 +79,11 @@ type PublicStorageSetting struct {
 	Mode                    string `json:"mode"`
 	AllowUserProvider       bool   `json:"allowUserProvider"`
 	AllowUserGlobalProvider bool   `json:"allowUserGlobalProvider"`
+}
+
+type PublicStorageConfig struct {
+	PublicStorageSetting
+	AutoSyncAllAssets bool `json:"autoSyncAllAssets"`
 }
 
 type PublicAuthSetting struct {
@@ -109,6 +119,7 @@ type PrivateStorageSetting struct {
 	Mode                    string                      `json:"mode"`
 	AllowUserProvider       bool                        `json:"allowUserProvider"`
 	AllowUserGlobalProvider bool                        `json:"allowUserGlobalProvider"`
+	AutoSyncAllAssets       bool                        `json:"autoSyncAllAssets"`
 	Providers               []StorageProvider           `json:"providers"`
 	RoundRobinCursor        int                         `json:"roundRobinCursor"`
 	CapacityCheck           StorageCapacityCheckSetting `json:"capacityCheck"`
@@ -126,6 +137,8 @@ type StorageProvider struct {
 	SecretAccessKey   string `json:"secretAccessKey"`
 	PublicBaseURL     string `json:"publicBaseUrl"`
 	PathPrefix        string `json:"pathPrefix"`
+	Username          string `json:"username"`
+	Password          string `json:"password"`
 	Weight            int    `json:"weight"`
 	Enabled           bool   `json:"enabled"`
 	OwnerUserID       string `json:"ownerUserId"`

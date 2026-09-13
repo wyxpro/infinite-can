@@ -11,11 +11,11 @@ import (
 )
 
 type UserConfigPayload struct {
-	ModelConfig      json.RawMessage             `json:"modelConfig,omitempty"`
-	StorageProvider  *StorageObjectProviderInput `json:"storageProvider,omitempty"`
-	ImageHistory     json.RawMessage             `json:"imageHistory,omitempty"`
-	AssetData        json.RawMessage             `json:"assetData,omitempty"`
-	SyncCapabilities map[string]bool             `json:"syncCapabilities,omitempty"`
+	ModelConfig      json.RawMessage       `json:"modelConfig,omitempty"`
+	StorageProvider  *UserStorageProviders `json:"storageProvider,omitempty"`
+	ImageHistory     json.RawMessage       `json:"imageHistory,omitempty"`
+	AssetData        json.RawMessage       `json:"assetData,omitempty"`
+	SyncCapabilities map[string]bool       `json:"syncCapabilities,omitempty"`
 }
 
 type StorageObjectProviderInput struct {
@@ -29,6 +29,13 @@ type StorageObjectProviderInput struct {
 	SecretAccessKey string `json:"secretAccessKey"`
 	PublicBaseURL   string `json:"publicBaseUrl"`
 	PathPrefix      string `json:"pathPrefix"`
+	Username        string `json:"username"`
+	Password        string `json:"password"`
+}
+
+type UserStorageProviders struct {
+	S3     *StorageObjectProviderInput `json:"s3,omitempty"`
+	WebDAV *StorageObjectProviderInput `json:"webdav,omitempty"`
 }
 
 type userModelConfigInput struct {
@@ -36,11 +43,12 @@ type userModelConfigInput struct {
 }
 
 type userLocalModelChannelInput struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	BaseURL string   `json:"baseUrl"`
-	APIKey  string   `json:"apiKey"`
-	Models  []string `json:"models"`
+	ID       string   `json:"id"`
+	Protocol string   `json:"protocol"`
+	Name     string   `json:"name"`
+	BaseURL  string   `json:"baseUrl"`
+	APIKey   string   `json:"apiKey"`
+	Models   []string `json:"models"`
 }
 
 func SelectUserLocalModelChannelForModel(userID string, modelName string, channelID string) (model.ModelChannel, error) {
@@ -80,15 +88,20 @@ func SelectUserLocalModelChannelForModel(userID string, modelName string, channe
 		if len(models) > 0 && !userLocalChannelHasModel(models, modelName) {
 			return model.ModelChannel{}, errors.New("本地渠道不支持该模型")
 		}
+		protocol := strings.ToLower(strings.TrimSpace(channel.Protocol))
+		if protocol == "" {
+			protocol = "openai"
+		}
 		return model.ModelChannel{
-			ID:      channelID,
-			Name:    firstVideoTaskValue(strings.TrimSpace(channel.Name), "本地直连"),
-			BaseURL: baseURL,
-			APIKey:  apiKey,
-			Models:  models,
-			Weight:  1,
-			Timeout: 600,
-			Enabled: true,
+			ID:       channelID,
+			Protocol: protocol,
+			Name:     firstVideoTaskValue(strings.TrimSpace(channel.Name), "本地直连"),
+			BaseURL:  baseURL,
+			APIKey:   apiKey,
+			Models:   models,
+			Weight:   1,
+			Timeout:  600,
+			Enabled:  true,
 		}, nil
 	}
 	return model.ModelChannel{}, errors.New("本地渠道不存在")
@@ -140,9 +153,20 @@ func CurrentUserConfig(ctx context.Context) (UserConfigPayload, error) {
 		result.ModelConfig = json.RawMessage(config.ModelConfig)
 	}
 	if strings.TrimSpace(config.StorageProvider) != "" {
-		var provider StorageObjectProviderInput
-		if err := json.Unmarshal([]byte(config.StorageProvider), &provider); err == nil {
-			result.StorageProvider = &provider
+		providers := readUserStorageProviders(config.StorageProvider)
+		var syncFlags struct {
+			SyncStorageConfig       bool `json:"syncStorageConfig"`
+			SyncWebDAVStorageConfig bool `json:"syncWebDAVStorageConfig"`
+		}
+		_ = json.Unmarshal(result.ModelConfig, &syncFlags)
+		if !syncFlags.SyncStorageConfig {
+			providers.S3 = nil
+		}
+		if !syncFlags.SyncWebDAVStorageConfig {
+			providers.WebDAV = nil
+		}
+		if providers.S3 != nil || providers.WebDAV != nil {
+			result.StorageProvider = &providers
 		}
 	}
 	if strings.TrimSpace(config.ImageHistory) != "" {
@@ -152,6 +176,14 @@ func CurrentUserConfig(ctx context.Context) (UserConfigPayload, error) {
 		result.AssetData = json.RawMessage(config.AssetData)
 	}
 	return result, nil
+}
+
+func readUserStorageProviders(raw string) UserStorageProviders {
+	var providers UserStorageProviders
+	if strings.TrimSpace(raw) != "" {
+		_ = json.Unmarshal([]byte(raw), &providers)
+	}
+	return providers
 }
 
 func SaveCurrentUserModelConfig(ctx context.Context, raw json.RawMessage) (UserConfigPayload, error) {

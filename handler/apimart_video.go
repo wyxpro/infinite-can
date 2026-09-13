@@ -43,14 +43,8 @@ type apimartInputConfig struct {
 	audioRefKind        string
 }
 
-func isAPIMartChannel(channel model.ModelChannel, modelName string) bool {
-	protocol := strings.ToLower(strings.TrimSpace(channel.Protocol))
-	baseURL := strings.ToLower(strings.TrimSpace(channel.BaseURL))
-	model := strings.ToLower(strings.TrimSpace(modelName))
-
-	return protocol == "apimart" ||
-		strings.Contains(baseURL, "apimart.ai") ||
-		strings.Contains(model, "apimart")
+func isAPIMartChannel(channel model.ModelChannel, _ string) bool {
+	return strings.EqualFold(strings.TrimSpace(channel.Protocol), "apimart")
 }
 
 func normalizeAPIMartVideoBody(body []byte, contentType string, modelName string, channel model.ModelChannel) ([]byte, string, error) {
@@ -193,18 +187,14 @@ func apimartVideoConfig(modelName string) apimartInputConfig {
 	}
 
 	switch {
-	case strings.Contains(model, "doubao-seedance-2"):
+	case strings.Contains(model, "seedance-2"):
 		config.aspectField = "size"
 		config.imageRefKind = "seedance2"
 		config.videoRefField = "video_urls"
 		config.videoRefKind = "array"
 		config.audioRefField = "audio_urls"
 		config.audioRefKind = "array"
-	case strings.Contains(model, "doubao-seedance-1-0"):
-		config.aspectField = "aspect_ratio"
-		config.imageRefField = "image_with_roles"
-		config.imageRefKind = "roles"
-	case strings.Contains(model, "doubao-seedance-1-5"), strings.Contains(model, "seedance-1"):
+	case strings.Contains(model, "seedance-1"):
 		config.aspectField = "aspect_ratio"
 		config.imageRefField = "image_with_roles"
 		config.imageRefKind = "roles"
@@ -223,6 +213,14 @@ func apimartVideoConfig(modelName string) apimartInputConfig {
 		config.imageRefKind = "first_last"
 	case strings.Contains(model, "veo"):
 		config.aspectField = "aspect_ratio"
+	case model == "minimax-h3":
+		config.aspectField = "aspect_ratio"
+		config.imageRefField = "image_urls"
+		config.imageRefKind = "minimax_h3"
+		config.videoRefField = "video_urls"
+		config.videoRefKind = "array"
+		config.audioRefField = "audio_urls"
+		config.audioRefKind = "array"
 	case strings.Contains(model, "minimax-hailuo-2-3"):
 		config.aspectField = ""
 		config.imageRefField = "first_frame_image"
@@ -333,6 +331,15 @@ func apimartVideoConfig(modelName string) apimartInputConfig {
 		config.aspectField = "aspect_ratio"
 		config.videoRefField = "video_urls"
 		config.videoRefKind = "array"
+	case strings.Contains(model, "flux-3-video"):
+		config.aspectField = "aspect_ratio"
+		config.hasResolution = true
+		config.resolutionCase = "video"
+		config.maxImageRefs = 10
+		config.imageRefField = "image_urls"
+		config.imageRefKind = "array"
+		config.videoRefField = "video_url"
+		config.videoRefKind = "single"
 	}
 	return config
 }
@@ -551,6 +558,56 @@ func normalizeAPIMartImageCount(payload map[string]any, config apimartInputConfi
 
 func applyAPIMartVideoDefaults(payload map[string]any, modelName string) {
 	model := normalizeAPIMartModelName(modelName)
+	if model == "seedance-2-5" {
+		switch strings.ToLower(strings.TrimSpace(toStringSafe(payload["resolution"]))) {
+		case "2k", "4k":
+			payload["resolution"] = "720p"
+		}
+		if !isEmptyValue(payload["duration"]) {
+			duration := normalizeAPIMartInt(payload["duration"])
+			if duration == -1 {
+			} else if duration < 4 {
+				duration = 4
+			} else if duration > 30 {
+				duration = 30
+			}
+			payload["duration"] = duration
+		}
+	}
+	if model == "flux-3-video" {
+		switch strings.ToLower(strings.TrimSpace(toStringSafe(payload["resolution"]))) {
+		case "360p", "360", "480p", "480":
+			payload["resolution"] = "720p"
+		}
+		if !isEmptyValue(payload["duration"]) {
+			duration := normalizeAPIMartInt(payload["duration"])
+			if duration < 5 {
+				duration = 5
+			}
+			if duration > 20 {
+				duration = 20
+			}
+			payload["duration"] = duration
+		}
+	}
+	if model == "minimax-h3" {
+		switch toStringSafe(payload["resolution"]) {
+		case "480p", "720p", "768p":
+			payload["resolution"] = "768P"
+		default:
+			payload["resolution"] = "2K"
+		}
+		if !isEmptyValue(payload["duration"]) {
+			duration := normalizeAPIMartInt(payload["duration"])
+			if duration < 4 {
+				duration = 4
+			}
+			if duration > 15 {
+				duration = 15
+			}
+			payload["duration"] = duration
+		}
+	}
 	if strings.Contains(model, "wan2-5") && isEmptyValue(payload["audio"]) {
 		payload["audio"] = true
 	}
@@ -587,9 +644,9 @@ func applyAPIMartVideoGenerateAudioInput(payload map[string]any, modelName strin
 	enabled := boolLike(value)
 	model := normalizeAPIMartModelName(modelName)
 	switch {
-	case strings.Contains(model, "doubao-seedance-2"), strings.Contains(model, "veo") && strings.Contains(model, "official"):
+	case strings.Contains(model, "seedance-2"), strings.Contains(model, "veo") && strings.Contains(model, "official"):
 		payload["generate_audio"] = enabled
-	case strings.Contains(model, "doubao-seedance-1-5"), strings.Contains(model, "seedance-1-5"):
+	case strings.Contains(model, "seedance-1-5"):
 		payload["audio"] = enabled
 	case model == "wan2-6", model == "wan2-6-i2v-flash":
 		payload["audio"] = enabled
@@ -620,9 +677,9 @@ func clearAPIMartConflictingReferences(payload map[string]any, modelName string)
 	if model == "happyhorse-1-1" && !isEmptyValue(payload["first_frame_image"]) {
 		delete(payload, "image_urls")
 	}
-	if strings.Contains(model, "doubao-seedance-2") && !isEmptyValue(payload["image_with_roles"]) {
+	if strings.Contains(model, "seedance-2") && !isEmptyValue(payload["image_with_roles"]) {
 		delete(payload, "image_urls")
-		if hasAPIMartFirstLastImageRole(payload) {
+		if strings.Contains(model, "seedance-2-0") && hasAPIMartFirstLastImageRole(payload) {
 			delete(payload, "video_urls")
 			delete(payload, "audio_urls")
 		}
@@ -973,7 +1030,7 @@ func isAPIMartLastFrameSource(sourceKey string) bool {
 
 func supportsAPIMartNamedFrameFields(config apimartInputConfig) bool {
 	switch config.imageRefKind {
-	case "first_last", "skyreels", "pixverse", "happyhorse":
+	case "first_last", "skyreels", "pixverse", "happyhorse", "minimax_h3":
 		return true
 	default:
 		return false
@@ -1629,6 +1686,12 @@ func normalizeAPIMartSizeRatio(width int, height int) string {
 		ratio  string
 	}{
 		{1, 1, "1:1"},
+		{2, 1, "2:1"},
+		{1, 2, "1:2"},
+		{3, 1, "3:1"},
+		{1, 3, "1:3"},
+		{5, 4, "5:4"},
+		{4, 5, "4:5"},
 		{16, 9, "16:9"},
 		{9, 16, "9:16"},
 		{4, 3, "4:3"},
@@ -1642,7 +1705,7 @@ func normalizeAPIMartSizeRatio(width int, height int) string {
 		if diff < 0 {
 			diff = -diff
 		}
-		if diff*100 <= width*item.height {
+		if diff*100 <= width*item.height*4 {
 			return item.ratio
 		}
 	}

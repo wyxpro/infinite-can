@@ -1,5 +1,7 @@
+import type { ModelChannelProtocol } from "@/lib/model-channel";
 import { apiDelete, apiGet, apiPost, compactApiParams } from "@/services/api/request";
 import type { Prompt, PromptListResponse } from "@/services/api/prompts";
+import type { AgentSkill, AgentSkillFile } from "@/services/api/agent-skills";
 
 export type AdminPromptCategory = {
     category: string;
@@ -141,6 +143,22 @@ export async function deleteAdminPrompts(token: string, ids: string[]) {
     return apiPost<boolean>("/api/admin/prompts/batch-delete", { ids }, token);
 }
 
+export function fetchAdminAgentSkills(token: string) {
+    return apiGet<AgentSkill[]>("/api/admin/agent-skills", undefined, token);
+}
+
+export function saveAdminAgentSkill(token: string, skill: Partial<AgentSkill>) {
+    return apiPost<AgentSkill>("/api/admin/agent-skills", skill, token);
+}
+
+export function fetchAdminAgentSkillFiles(token: string, id: string) {
+    return apiGet<AgentSkillFile[]>(`/api/admin/agent-skills/${encodeURIComponent(id)}/files`, undefined, token);
+}
+
+export function deleteAdminAgentSkill(token: string, id: string) {
+    return apiDelete<boolean>(`/api/admin/agent-skills/${encodeURIComponent(id)}`, token);
+}
+
 export type AdminAssetQuery = {
     keyword?: string;
     type?: string;
@@ -163,7 +181,7 @@ export async function deleteAdminAsset(token: string, id: string) {
 
 export type AdminModelChannel = {
     id: string;
-    protocol: "openai" | "kie";
+    protocol: ModelChannelProtocol;
     name: string;
     baseUrl: string;
     apiKey: string;
@@ -201,6 +219,7 @@ export type AdminModelCost = {
 
 export type AdminPublicModelChannelInfo = {
     id: string;
+    protocol: AdminModelChannel["protocol"];
     name: string;
     baseUrl: string;
     models: string[];
@@ -227,7 +246,7 @@ export type AdminPublicSettings = {
 export type AdminStorageProvider = {
     id: string;
     name: string;
-    type: "s3";
+    type: "s3" | "webdav";
     endpoint: string;
     region: string;
     bucket: string;
@@ -235,6 +254,8 @@ export type AdminStorageProvider = {
     secretAccessKey: string;
     publicBaseUrl: string;
     pathPrefix: string;
+    username: string;
+    password: string;
     weight: number;
     enabled: boolean;
     ownerUserId: string;
@@ -267,6 +288,7 @@ export type AdminPrivateSettings = {
         mode: string;
         allowUserProvider: boolean;
         allowUserGlobalProvider: boolean;
+        autoSyncAllAssets: boolean;
         providers: AdminStorageProvider[];
         roundRobinCursor: number;
         capacityCheck: {

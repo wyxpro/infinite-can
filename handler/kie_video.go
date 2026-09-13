@@ -233,6 +233,7 @@ func isKIEFrontendOnlyField(key string) bool {
 
 func normalizeKIEInputFields(input map[string]any, modelName string) {
 	config := kieModelInputConfig(modelName)
+	layerSize, layerQuality := input["size"], input["quality"]
 
 	if value, ok := input["resolution_name"]; ok {
 		if !isEmptyValue(value) {
@@ -283,6 +284,10 @@ func normalizeKIEInputFields(input map[string]any, modelName string) {
 				delete(input, key)
 			}
 		}
+	}
+	if isKIESeedreamLayerDecompositionModel(modelName) {
+		normalizeKIESeedreamLayerDecompositionInput(input, layerSize, layerQuality)
+		return
 	}
 
 	if value, ok := input["resolution"]; ok {
@@ -352,6 +357,7 @@ func normalizeKIEInputFields(input map[string]any, modelName string) {
 
 	normalizeKIEKlingV3VideoInput(input, modelName)
 	applyKIEVideoGenerateAudioInput(input, modelName)
+	normalizeKIEKlingOmniVideoInput(input, modelName)
 	if value, ok := input["output_format"]; ok {
 		if config.hasOutputFormat {
 			input["output_format"] = normalizeKIEOutputFormat(toStringSafe(value))
@@ -362,6 +368,41 @@ func normalizeKIEInputFields(input map[string]any, modelName string) {
 
 	applyKIEModelDefaults(input, modelName)
 
+	for key := range input {
+		if isKIEFrontendOnlyField(key) {
+			delete(input, key)
+		}
+	}
+}
+
+func isKIESeedreamLayerDecompositionModel(modelName string) bool {
+	return strings.EqualFold(strings.TrimSpace(modelName), "seedream/5-pro-layer-decomposition")
+}
+
+func normalizeKIESeedreamLayerDecompositionInput(input map[string]any, size any, quality any) {
+	clearKIEReferenceAliases(input, "image_url")
+	resolution := strings.ToLower(strings.TrimSpace(toStringSafe(size)))
+	switch resolution {
+	case "1k", "1.5k", "2k":
+		input["size"] = strings.ToUpper(resolution)
+	case "auto":
+		input["size"] = "auto"
+	default:
+		switch strings.ToLower(strings.TrimSpace(toStringSafe(quality))) {
+		case "low":
+			input["size"] = "1K"
+		case "medium":
+			input["size"] = "1.5K"
+		case "high":
+			input["size"] = "2K"
+		default:
+			input["size"] = "auto"
+		}
+	}
+	input["output_format"] = "png"
+	for _, key := range []string{"quality", "ratio", "aspect_ratio", "image_size", "resolution", "image_resolution", "n", "num_images", "max_images", "actual_image_count"} {
+		delete(input, key)
+	}
 	for key := range input {
 		if isKIEFrontendOnlyField(key) {
 			delete(input, key)
@@ -485,6 +526,29 @@ func normalizeKIEHailuoVideoResolution(value string) string {
 	}
 }
 
+func normalizeKIEMiniMaxH3VideoResolution(value string) string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), " ", "")
+
+	switch strings.ToLower(value) {
+	case "480", "480p", "720", "720p", "768", "768p":
+		return "768P"
+	case "1080", "1080p", "2k", "2048", "2048p":
+		return "2K"
+	default:
+		return value
+	}
+}
+
+func normalizeKIESeedance25VideoResolution(value string) string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), " ", "")
+	switch strings.ToLower(value) {
+	case "1080", "1080p", "2k", "4k":
+		return "720p"
+	default:
+		return normalizeKIEResolution(value)
+	}
+}
+
 func normalizeKIEImageQuality(modelName string, value any) string {
 	quality := strings.ToLower(strings.TrimSpace(toStringSafe(value)))
 	model := strings.ToLower(strings.TrimSpace(modelName))
@@ -564,6 +628,148 @@ func normalizeKIEKlingV3VideoInput(input map[string]any, modelName string) {
 	}
 }
 
+func normalizeKIEKlingOmniVideoInput(input map[string]any, modelName string) {
+	variant := kieKlingOmniVariant(modelName)
+	if variant == "" {
+		return
+	}
+
+	delete(input, "negative_prompt")
+	if value, ok := input["resolution"]; ok && !isEmptyValue(value) {
+		input["resolution"] = normalizeKIEKlingOmniResolution(value)
+	}
+	if value, ok := input["mode"]; ok && !isEmptyValue(value) {
+		input["resolution"] = normalizeKIEKlingOmniResolution(value)
+	}
+	delete(input, "mode")
+
+	if value, ok := input["element_list"]; ok {
+		if elements := normalizeKIEKlingV3Elements(value); len(elements) > 0 {
+			input["elements"] = elements
+		} else {
+			delete(input, "elements")
+		}
+		delete(input, "element_list")
+	} else if value, ok := input["elements"]; ok {
+		if elements := normalizeKIEKlingV3Elements(value); len(elements) > 0 {
+			input["elements"] = elements
+		} else {
+			delete(input, "elements")
+		}
+	}
+	delete(input, "kling_elements")
+
+	multiShot, hasMultiShot := input["multi_shot"]
+	if !hasMultiShot {
+		multiShot, hasMultiShot = input["multi_shots"]
+	}
+	delete(input, "multi_shot")
+	delete(input, "multi_shots")
+	shotType := strings.ToLower(strings.TrimSpace(toStringSafe(input["shot_type"])))
+	delete(input, "shot_type")
+
+	switch variant {
+	case "text-to-video", "image-to-video":
+		customShots := boolLike(input["customize_multi_shots"])
+		smartShots := boolLike(input["prefer_multi_shots"])
+		if hasMultiShot {
+			customShots = boolLike(multiShot) && shotType == "customize"
+			smartShots = boolLike(multiShot) && !customShots
+		}
+		if customShots {
+			smartShots = false
+		}
+		input["customize_multi_shots"] = customShots
+		input["prefer_multi_shots"] = smartShots
+		if !customShots {
+			delete(input, "multi_prompt")
+		}
+	case "reference-to-video":
+		customShots := boolLike(input["customize_multi_shots"])
+		if hasMultiShot {
+			customShots = boolLike(multiShot)
+		}
+		input["customize_multi_shots"] = customShots
+		delete(input, "prefer_multi_shots")
+		if !customShots {
+			delete(input, "multi_prompt")
+		}
+	case "transformation":
+		delete(input, "customize_multi_shots")
+		delete(input, "prefer_multi_shots")
+		delete(input, "multi_prompt")
+		delete(input, "elements")
+	}
+
+	if value, ok := input["multi_prompt"]; ok {
+		if prompts := normalizeKIEKlingMultiPrompt(value, 15); len(prompts) > 0 {
+			if len(prompts) > 6 {
+				prompts = prompts[:6]
+			}
+			input["multi_prompt"] = prompts
+		} else {
+			delete(input, "multi_prompt")
+		}
+	}
+
+	imageCount := len(readStringSlice(input["image_urls"]))
+	hasVideo := len(readStringSlice(input["video_urls"])) > 0
+	switch variant {
+	case "text-to-video":
+		for _, key := range append(kieImageReferenceAliasKeys(), kieVideoReferenceAliasKeys()...) {
+			delete(input, key)
+		}
+	case "image-to-video":
+		if imageCount > 1 {
+			input["aspect_ratio"] = "auto"
+		}
+		for _, key := range kieVideoReferenceAliasKeys() {
+			delete(input, key)
+		}
+	case "reference-to-video":
+		if hasVideo {
+			input["aspect_ratio"] = "auto"
+			input["audio"] = false
+			if imageCount == 0 && isEmptyValue(input["elements"]) {
+				delete(input, "duration")
+				input["customize_multi_shots"] = false
+				delete(input, "multi_prompt")
+			}
+		}
+	case "transformation":
+		if hasVideo && imageCount == 0 {
+			input["aspect_ratio"] = "auto"
+			delete(input, "duration")
+		}
+	}
+}
+
+func kieKlingOmniVariant(modelName string) string {
+	const prefix = "kling-3.0-omni/"
+	modelName = strings.ToLower(strings.TrimSpace(modelName))
+	if !strings.HasPrefix(modelName, prefix) {
+		return ""
+	}
+	variant := strings.TrimPrefix(modelName, prefix)
+	switch variant {
+	case "text-to-video", "image-to-video", "reference-to-video", "transformation":
+		return variant
+	default:
+		return ""
+	}
+}
+
+func normalizeKIEKlingOmniResolution(value any) string {
+	switch strings.ToLower(strings.TrimSpace(toStringSafe(value))) {
+	case "4k":
+		return "4k"
+	case "pro", "1080", "1080p":
+		return "1080p"
+	default:
+		return "720p"
+	}
+}
+
 func normalizeKIEKlingV3Mode(value any) string {
 	switch strings.ToLower(strings.TrimSpace(toStringSafe(value))) {
 	case "4k":
@@ -576,6 +782,10 @@ func normalizeKIEKlingV3Mode(value any) string {
 }
 
 func normalizeKIEKlingV3MultiPrompt(value any) []map[string]any {
+	return normalizeKIEKlingMultiPrompt(value, 12)
+}
+
+func normalizeKIEKlingMultiPrompt(value any, maxDuration int) []map[string]any {
 	items, ok := value.([]any)
 	if !ok {
 		return nil
@@ -588,19 +798,19 @@ func normalizeKIEKlingV3MultiPrompt(value any) []map[string]any {
 		}
 		result = append(result, map[string]any{
 			"prompt":   strings.TrimSpace(toStringSafe(record["prompt"])),
-			"duration": normalizeKIEKlingV3MultiPromptDuration(record["duration"]),
+			"duration": normalizeKIEKlingMultiPromptDuration(record["duration"], maxDuration),
 		})
 	}
 	return result
 }
 
-func normalizeKIEKlingV3MultiPromptDuration(value any) int {
+func normalizeKIEKlingMultiPromptDuration(value any, maxDuration int) int {
 	duration, err := strconv.Atoi(normalizeKIEDurationString(toStringSafe(value)))
 	if err != nil || duration < 1 {
 		duration = 1
 	}
-	if duration > 12 {
-		duration = 12
+	if duration > maxDuration {
+		duration = maxDuration
 	}
 	return duration
 }
@@ -655,6 +865,10 @@ func normalizeKIEKlingV3Elements(value any) []map[string]any {
 
 func applyKIEModelDefaults(input map[string]any, modelName string) {
 	switch strings.ToLower(strings.TrimSpace(modelName)) {
+	case "minimax-h3/text-to-video":
+		if _, ok := input["aspect_ratio"]; !ok {
+			input["aspect_ratio"] = "16:9"
+		}
 	case "kling-2.6/text-to-video", "kling-2.6/image-to-video":
 		if _, ok := input["sound"]; !ok {
 			input["sound"] = false
@@ -704,7 +918,9 @@ func applyKIEVideoGenerateAudioInput(input map[string]any, modelName string) {
 		input["sound"] = enabled
 	case "kling-3.0/video":
 		input["sound"] = enabled
-	case "bytedance/seedance-2", "bytedance/seedance-2-fast", "bytedance/seedance-2-mini", "bytedance/seedance-1.5-pro", "bytedance/seedance-1-5-pro":
+	case "kling-3.0-omni/text-to-video", "kling-3.0-omni/image-to-video", "kling-3.0-omni/reference-to-video", "kling-3.0-omni/transformation":
+		input["audio"] = enabled
+	case "bytedance/seedance-2", "bytedance/seedance-2-fast", "bytedance/seedance-2-mini", "bytedance/seedance-1.5-pro", "bytedance/seedance-1-5-pro", "bytedance/seedance-2-5":
 		input["generate_audio"] = enabled
 	case "wan/2-6-flash-image-to-video", "wan/2-6-flash-video-to-video":
 		input["audio"] = enabled
@@ -714,6 +930,14 @@ func applyKIEVideoGenerateAudioInput(input map[string]any, modelName string) {
 func validateKIERequiredInputs(input map[string]any, modelName string) error {
 	model := strings.ToLower(strings.TrimSpace(modelName))
 	switch model {
+	case "kling-3.0-omni/text-to-video":
+		return requireKIEAnyInput(input, "prompt")
+	case "kling-3.0-omni/image-to-video":
+		return requireKIEAnyInput(input, "image_urls")
+	case "kling-3.0-omni/reference-to-video":
+		return requireKIEAnyInput(input, "image_urls", "video_urls", "elements")
+	case "kling-3.0-omni/transformation":
+		return requireKIEAnyInput(input, "video_urls")
 	case "kling/v3-turbo-text-to-video", "bytedance/seedance-2-mini", "happyhorse-1-1/text-to-video":
 		return requireKIEAnyInput(input, "prompt")
 	case "kling/v3-turbo-image-to-video", "happyhorse-1-1/image-to-video":
@@ -724,7 +948,7 @@ func validateKIERequiredInputs(input map[string]any, modelName string) error {
 		return requireKIEAnyInput(input, "input_urls")
 	case "google/nano-banana-edit", "grok-imagine/image-to-image", "seedream/4.5-edit", "seedream/5-lite-image-to-image", "seedream/5-pro-image-to-image", "bytedance/seedream-v4-edit":
 		return requireKIEAnyInput(input, "image_urls")
-	case "qwen/image-to-image", "qwen/image-edit", "qwen2/image-edit", "ideogram/v3-remix":
+	case "qwen/image-to-image", "qwen/image-edit", "qwen2/image-edit", "ideogram/v3-remix", "seedream/5-pro-layer-decomposition":
 		return requireKIEAnyInput(input, "image_url")
 	case "ideogram/character":
 		return requireKIEAnyInput(input, "reference_image_urls")
@@ -798,147 +1022,154 @@ func requireKIEAnyInput(input map[string]any, fields ...string) error {
 }
 
 type kieInputConfig struct {
-	aspectField     string
-	aspectKind      string
-	durationKind    string
-	durationMin     int
-	durationMax     int
-	hasResolution   bool
-	resolutionField string
-	resolutionKind  string
-	maxResolution   string
-	countField      string
-	countKind       string
-	hasQuality      bool
-	hasOutputFormat bool
-	presetField     string
-	imageRefField   string
-	imageRefKind    string
-	videoRefField   string
-	videoRefKind    string
-	audioRefField   string
-	audioRefKind    string
+	aspectField       string
+	aspectKind        string
+	durationKind      string
+	durationMin       int
+	durationMax       int
+	allowAutoDuration bool
+	hasResolution     bool
+	resolutionField   string
+	resolutionKind    string
+	maxResolution     string
+	countField        string
+	countKind         string
+	hasQuality        bool
+	hasOutputFormat   bool
+	presetField       string
+	imageRefField     string
+	imageRefKind      string
+	videoRefField     string
+	videoRefKind      string
+	audioRefField     string
+	audioRefKind      string
+}
+
+var kieModelInputConfigs = map[string]kieInputConfig{
+	"bytedance/seedance-1.5-pro":           {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "input_urls", imageRefKind: "array"},
+	"bytedance/seedance-2":                 {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image_urls", imageRefKind: "array", videoRefField: "reference_video_urls", videoRefKind: "array", audioRefField: "reference_audio_urls", audioRefKind: "array"},
+	"bytedance/seedance-2-fast":            {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image_urls", imageRefKind: "array", videoRefField: "reference_video_urls", videoRefKind: "array", audioRefField: "reference_audio_urls", audioRefKind: "array"},
+	"bytedance/seedance-2-mini":            {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image_urls", imageRefKind: "array", videoRefField: "reference_video_urls", videoRefKind: "array", audioRefField: "reference_audio_urls", audioRefKind: "array"},
+	"bytedance/seedance-2-5":               {aspectField: "aspect_ratio", durationKind: "number", durationMin: 4, durationMax: 30, allowAutoDuration: true, hasResolution: true, resolutionKind: "seedance_2_5_video", imageRefField: "reference_image_urls", imageRefKind: "array", videoRefField: "reference_video_urls", videoRefKind: "array", audioRefField: "reference_audio_urls", audioRefKind: "array"},
+	"bytedance/v1-lite-image-to-video":     {durationKind: "string", hasResolution: true, imageRefField: "image_url", imageRefKind: "single"},
+	"bytedance/v1-lite-text-to-video":      {aspectField: "aspect_ratio", durationKind: "string", hasResolution: true},
+	"bytedance/v1-pro-fast-image-to-video": {durationKind: "string", hasResolution: true, imageRefField: "image_url", imageRefKind: "single"},
+	"bytedance/v1-pro-image-to-video":      {durationKind: "string", hasResolution: true, imageRefField: "image_url", imageRefKind: "single"},
+	"bytedance/v1-pro-text-to-video":       {aspectField: "aspect_ratio", durationKind: "string", hasResolution: true},
+
+	"gemini-omni-video":                 {aspectField: "aspect_ratio", durationKind: "string", hasResolution: true, imageRefField: "image_urls", imageRefKind: "array", videoRefField: "video_list", videoRefKind: "gemini_video_list", audioRefField: "audio_ids", audioRefKind: "array"},
+	"grok-imagine/image-to-video":       {aspectField: "aspect_ratio", durationKind: "string", durationMin: 6, durationMax: 30, hasResolution: true, presetField: "mode", imageRefField: "image_urls", imageRefKind: "array"},
+	"grok-imagine/text-to-video":        {aspectField: "aspect_ratio", durationKind: "string", durationMin: 6, durationMax: 30, hasResolution: true, presetField: "mode"},
+	"grok-imagine-video-1-5-preview":    {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "image_urls", imageRefKind: "array"},
+	"happyhorse/image-to-video":         {durationKind: "number", hasResolution: true, imageRefField: "image_urls", imageRefKind: "array"},
+	"happyhorse/reference-to-video":     {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image", imageRefKind: "array"},
+	"happyhorse/text-to-video":          {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true},
+	"happyhorse/video-edit":             {hasResolution: true, imageRefField: "reference_image", imageRefKind: "array", videoRefField: "video_url", videoRefKind: "single"},
+	"happyhorse-1-1/text-to-video":      {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true},
+	"happyhorse-1-1/image-to-video":     {durationKind: "number", hasResolution: true, imageRefField: "image_urls", imageRefKind: "single_array"},
+	"happyhorse-1-1/reference-to-video": {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image", imageRefKind: "array"},
+
+	"minimax-h3/text-to-video":           {aspectField: "aspect_ratio", durationKind: "number", durationMin: 4, durationMax: 15, hasResolution: true, resolutionKind: "minimax_h3_video"},
+	"minimax-h3/image-to-video":          {durationKind: "number", durationMin: 4, durationMax: 15, hasResolution: true, resolutionKind: "minimax_h3_video", imageRefField: "first_frame_url", imageRefKind: "single"},
+	"minimax-h3/reference-to-video":      {aspectField: "aspect_ratio", durationKind: "number", durationMin: 4, durationMax: 15, hasResolution: true, resolutionKind: "minimax_h3_video", imageRefField: "reference_image_urls", imageRefKind: "array", videoRefField: "reference_video_urls", videoRefKind: "array", audioRefField: "reference_audio_urls", audioRefKind: "array"},
+	"hailuo/02-image-to-video-standard":  {durationKind: "string", hasResolution: true, resolutionKind: "hailuo_video", imageRefField: "image_url", imageRefKind: "single"},
+	"hailuo/02-image-to-video-pro":       {durationKind: "string", hasResolution: true, resolutionKind: "hailuo_video", imageRefField: "image_url", imageRefKind: "single"},
+	"hailuo/02-text-to-video-standard":   {durationKind: "string"},
+	"hailuo/02-text-to-video-pro":        {durationKind: "string"},
+	"hailuo/2-3-image-to-video-pro":      {durationKind: "string", hasResolution: true, resolutionKind: "hailuo_video", imageRefField: "image_url", imageRefKind: "single"},
+	"hailuo/2-3-image-to-video-standard": {durationKind: "string", hasResolution: true, resolutionKind: "hailuo_video", imageRefField: "image_url", imageRefKind: "single"},
+
+	"kling-2.6/image-to-video":            {durationKind: "string", imageRefField: "image_urls", imageRefKind: "array"},
+	"kling-2.6/text-to-video":             {aspectField: "aspect_ratio", durationKind: "string"},
+	"kling-2.6/motion-control":            {durationKind: "string", imageRefField: "input_urls", imageRefKind: "array", videoRefField: "video_urls", videoRefKind: "array"},
+	"kling-3.0/motion-control":            {durationKind: "string", imageRefField: "input_urls", imageRefKind: "array", videoRefField: "video_urls", videoRefKind: "array"},
+	"kling-3.0/video":                     {aspectField: "aspect_ratio", durationKind: "string", presetField: "mode", imageRefField: "image_urls", imageRefKind: "array"},
+	"kling-3.0-omni/text-to-video":        {aspectField: "aspect_ratio", durationKind: "number", durationMin: 3, durationMax: 15, hasResolution: true},
+	"kling-3.0-omni/image-to-video":       {aspectField: "aspect_ratio", durationKind: "number", durationMin: 3, durationMax: 15, hasResolution: true, imageRefField: "image_urls", imageRefKind: "array"},
+	"kling-3.0-omni/reference-to-video":   {aspectField: "aspect_ratio", durationKind: "number", durationMin: 3, durationMax: 15, hasResolution: true, imageRefField: "image_urls", imageRefKind: "array", videoRefField: "video_urls", videoRefKind: "array"},
+	"kling-3.0-omni/transformation":       {aspectField: "aspect_ratio", durationKind: "number", durationMin: 3, durationMax: 15, hasResolution: true, imageRefField: "image_urls", imageRefKind: "array", videoRefField: "video_urls", videoRefKind: "array"},
+	"kling/v3-turbo-text-to-video":        {aspectField: "aspect_ratio", durationKind: "string", hasResolution: true},
+	"kling/v3-turbo-image-to-video":       {durationKind: "string", hasResolution: true, imageRefField: "image_urls", imageRefKind: "array"},
+	"kling/ai-avatar-standard":            {imageRefField: "image_url", imageRefKind: "single", audioRefField: "audio_url", audioRefKind: "single"},
+	"kling/ai-avatar-pro":                 {imageRefField: "image_url", imageRefKind: "single", audioRefField: "audio_url", audioRefKind: "single"},
+	"kling/v2-1-master-image-to-video":    {durationKind: "string", imageRefField: "image_url", imageRefKind: "single"},
+	"kling/v2-1-master-text-to-video":     {aspectField: "aspect_ratio", durationKind: "string"},
+	"kling/v2-1-pro":                      {durationKind: "string", imageRefField: "image_url", imageRefKind: "single"},
+	"kling/v2-1-standard":                 {durationKind: "string", imageRefField: "image_url", imageRefKind: "single"},
+	"kling/v2-5-turbo-image-to-video-pro": {durationKind: "string", imageRefField: "image_url", imageRefKind: "single"},
+	"kling/v2-5-turbo-text-to-video-pro":  {aspectField: "aspect_ratio", durationKind: "string"},
+
+	"wan/2-2-a14b-image-to-video-turbo":  {hasResolution: true, imageRefField: "image_url", imageRefKind: "single"},
+	"wan/2-2-a14b-speech-to-video-turbo": {hasResolution: true, imageRefField: "image_url", imageRefKind: "single", audioRefField: "audio_url", audioRefKind: "single"},
+	"wan/2-2-a14b-text-to-video-turbo":   {aspectField: "aspect_ratio", hasResolution: true},
+	"wan/2-2-animate-move":               {hasResolution: true, imageRefField: "image_url", imageRefKind: "single", videoRefField: "video_url", videoRefKind: "single"},
+	"wan/2-2-animate-replace":            {hasResolution: true, imageRefField: "image_url", imageRefKind: "single", videoRefField: "video_url", videoRefKind: "single"},
+	"wan/2-5-image-to-video":             {durationKind: "string", hasResolution: true, imageRefField: "image_url", imageRefKind: "single"},
+	"wan/2-5-text-to-video":              {aspectField: "aspect_ratio", durationKind: "string", hasResolution: true},
+	"wan/2-6-flash-image-to-video":       {durationKind: "string", hasResolution: true, imageRefField: "image_urls", imageRefKind: "array"},
+	"wan/2-6-flash-video-to-video":       {durationKind: "string", hasResolution: true, videoRefField: "video_urls", videoRefKind: "array"},
+	"wan/2-6-image-to-video":             {durationKind: "string", hasResolution: true, imageRefField: "image_urls", imageRefKind: "array"},
+	"wan/2-6-text-to-video":              {durationKind: "string", hasResolution: true},
+	"wan/2-6-video-to-video":             {durationKind: "string", hasResolution: true, videoRefField: "video_urls", videoRefKind: "array"},
+	"wan/2-7-image-to-video":             {durationKind: "number", hasResolution: true, imageRefField: "first_frame_url", imageRefKind: "single", videoRefField: "first_clip_url", videoRefKind: "single", audioRefField: "driving_audio_url", audioRefKind: "single"},
+	"wan/2-7-r2v":                        {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image", imageRefKind: "array", videoRefField: "reference_video", videoRefKind: "array", audioRefField: "reference_voice", audioRefKind: "single"},
+	"wan/2-7-text-to-video":              {aspectField: "ratio", durationKind: "number", hasResolution: true, audioRefField: "audio_url", audioRefKind: "single"},
+	"wan/2-7-videoedit":                  {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image", imageRefKind: "single", videoRefField: "video_url", videoRefKind: "single"},
+
+	"bytedance/seedream":                  {aspectField: "image_size", aspectKind: "image_size_named"},
+	"bytedance/seedream-v4-edit":          {aspectField: "image_size", aspectKind: "image_size_named", resolutionField: "image_resolution", resolutionKind: "image", countField: "max_images", imageRefField: "image_urls", imageRefKind: "array"},
+	"bytedance/seedream-v4-text-to-image": {aspectField: "image_size", aspectKind: "image_size_named", resolutionField: "image_resolution", resolutionKind: "image", countField: "max_images"},
+	"flux-2/flex-image-to-image":          {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", maxResolution: "2K", imageRefField: "input_urls", imageRefKind: "array"},
+	"flux-2/flex-text-to-image":           {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", maxResolution: "2K"},
+	"flux-2/pro-image-to-image":           {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", maxResolution: "2K", imageRefField: "input_urls", imageRefKind: "array"},
+	"flux-2/pro-text-to-image":            {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", maxResolution: "2K"},
+	"gpt-image-2-image-to-image":          {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", imageRefField: "input_urls", imageRefKind: "array"},
+	"gpt-image-2-text-to-image":           {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image"},
+	"nano-banana-2":                       {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", hasOutputFormat: true, imageRefField: "image_input", imageRefKind: "array"},
+	"nano-banana-2-lite":                  {aspectField: "aspect_ratio", imageRefField: "image_urls", imageRefKind: "array"},
+	"nano-banana-pro":                     {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", hasOutputFormat: true, imageRefField: "image_input", imageRefKind: "array"},
+	"wan/2-7-image":                       {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", countField: "n", imageRefField: "input_urls", imageRefKind: "array"},
+	"wan/2-7-image-pro":                   {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", countField: "n", imageRefField: "input_urls", imageRefKind: "array"},
+
+	"google/imagen4":                       {aspectField: "aspect_ratio"},
+	"google/imagen4-fast":                  {aspectField: "aspect_ratio"},
+	"google/imagen4-ultra":                 {aspectField: "aspect_ratio"},
+	"google/nano-banana":                   {aspectField: "aspect_ratio", hasOutputFormat: true},
+	"google/nano-banana-edit":              {aspectField: "aspect_ratio", hasOutputFormat: true, imageRefField: "image_urls", imageRefKind: "array"},
+	"gpt-image/1.5-image-to-image":         {aspectField: "aspect_ratio", hasQuality: true, imageRefField: "input_urls", imageRefKind: "array"},
+	"gpt-image/1.5-text-to-image":          {aspectField: "aspect_ratio", hasQuality: true},
+	"grok-imagine-image-2-0/text-to-image": {aspectField: "aspect_ratio"},
+	"grok-imagine/text-to-image":           {aspectField: "aspect_ratio"},
+	"grok-imagine/image-to-image":          {imageRefField: "image_urls", imageRefKind: "array"},
+	"grok-imagine/extend":                  {imageRefField: "image_url", imageRefKind: "single"},
+	"ideogram/character":                   {aspectField: "image_size", aspectKind: "image_size_named", countField: "num_images", countKind: "string", imageRefField: "reference_image_urls", imageRefKind: "array"},
+	"ideogram/character-edit":              {countField: "num_images", countKind: "string", imageRefField: "image_url", imageRefKind: "single"},
+	"ideogram/character-remix":             {aspectField: "image_size", aspectKind: "image_size_named", countField: "num_images", countKind: "string", imageRefField: "reference_image_urls", imageRefKind: "array"},
+	"ideogram/v3-edit":                     {imageRefField: "image_url", imageRefKind: "single"},
+	"ideogram/v3-remix":                    {aspectField: "image_size", aspectKind: "image_size_named", countField: "num_images", countKind: "string", imageRefField: "image_url", imageRefKind: "single"},
+	"ideogram/v3-text-to-image":            {aspectField: "image_size", aspectKind: "image_size_named"},
+	"qwen/text-to-image":                   {aspectField: "image_size", aspectKind: "image_size_named", hasOutputFormat: true},
+	"qwen/image-edit":                      {aspectField: "image_size", aspectKind: "image_size_named", countField: "num_images", countKind: "string", hasOutputFormat: true, imageRefField: "image_url", imageRefKind: "single"},
+	"qwen/image-to-image":                  {hasOutputFormat: true, imageRefField: "image_url", imageRefKind: "single"},
+	"qwen2/image-edit":                     {aspectField: "image_size", hasOutputFormat: true, imageRefField: "image_url", imageRefKind: "single"},
+	"qwen2/text-to-image":                  {aspectField: "image_size", hasOutputFormat: true},
+	"recraft/crisp-upscale":                {imageRefField: "image", imageRefKind: "single"},
+	"recraft/remove-background":            {imageRefField: "image", imageRefKind: "single"},
+	"seedream/4.5-edit":                    {aspectField: "aspect_ratio", hasQuality: true, imageRefField: "image_urls", imageRefKind: "array"},
+	"seedream/4.5-text-to-image":           {aspectField: "aspect_ratio", hasQuality: true},
+	"seedream/5-lite-image-to-image":       {aspectField: "aspect_ratio", hasQuality: true, imageRefField: "image_urls", imageRefKind: "array"},
+	"seedream/5-lite-text-to-image":        {aspectField: "aspect_ratio", hasQuality: true},
+	"seedream/5-pro-text-to-image":         {aspectField: "aspect_ratio", hasQuality: true},
+	"seedream/5-pro-image-to-image":        {aspectField: "aspect_ratio", hasQuality: true, imageRefField: "image_urls", imageRefKind: "array"},
+	"seedream/5-pro-layer-decomposition":   {imageRefField: "image_url", imageRefKind: "single"},
+	"topaz/image-upscale":                  {imageRefField: "image_url", imageRefKind: "single"},
+	"topaz/video-upscale":                  {videoRefField: "video_url", videoRefKind: "single"},
+	"infinitalk/from-audio":                {hasResolution: true, imageRefField: "image_url", imageRefKind: "single", audioRefField: "audio_url", audioRefKind: "single"},
+	"z-image":                              {aspectField: "aspect_ratio"},
 }
 
 func kieModelInputConfig(modelName string) kieInputConfig {
-	modelName = strings.ToLower(strings.TrimSpace(modelName))
-	configs := map[string]kieInputConfig{
-		"bytedance/seedance-1.5-pro":           {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "input_urls", imageRefKind: "array"},
-		"bytedance/seedance-2":                 {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image_urls", imageRefKind: "array", videoRefField: "reference_video_urls", videoRefKind: "array", audioRefField: "reference_audio_urls", audioRefKind: "array"},
-		"bytedance/seedance-2-fast":            {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image_urls", imageRefKind: "array", videoRefField: "reference_video_urls", videoRefKind: "array", audioRefField: "reference_audio_urls", audioRefKind: "array"},
-		"bytedance/seedance-2-mini":            {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image_urls", imageRefKind: "array", videoRefField: "reference_video_urls", videoRefKind: "array", audioRefField: "reference_audio_urls", audioRefKind: "array"},
-		"bytedance/v1-lite-image-to-video":     {durationKind: "string", hasResolution: true, imageRefField: "image_url", imageRefKind: "single"},
-		"bytedance/v1-lite-text-to-video":      {aspectField: "aspect_ratio", durationKind: "string", hasResolution: true},
-		"bytedance/v1-pro-fast-image-to-video": {durationKind: "string", hasResolution: true, imageRefField: "image_url", imageRefKind: "single"},
-		"bytedance/v1-pro-image-to-video":      {durationKind: "string", hasResolution: true, imageRefField: "image_url", imageRefKind: "single"},
-		"bytedance/v1-pro-text-to-video":       {aspectField: "aspect_ratio", durationKind: "string", hasResolution: true},
-
-		"gemini-omni-video":                 {aspectField: "aspect_ratio", durationKind: "string", hasResolution: true, imageRefField: "image_urls", imageRefKind: "array", videoRefField: "video_list", videoRefKind: "gemini_video_list", audioRefField: "audio_ids", audioRefKind: "array"},
-		"grok-imagine/image-to-video":       {aspectField: "aspect_ratio", durationKind: "string", durationMin: 6, durationMax: 30, hasResolution: true, presetField: "mode", imageRefField: "image_urls", imageRefKind: "array"},
-		"grok-imagine/text-to-video":        {aspectField: "aspect_ratio", durationKind: "string", durationMin: 6, durationMax: 30, hasResolution: true, presetField: "mode"},
-		"grok-imagine-video-1-5-preview":    {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "image_urls", imageRefKind: "array"},
-		"happyhorse/image-to-video":         {durationKind: "number", hasResolution: true, imageRefField: "image_urls", imageRefKind: "array"},
-		"happyhorse/reference-to-video":     {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image", imageRefKind: "array"},
-		"happyhorse/text-to-video":          {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true},
-		"happyhorse/video-edit":             {hasResolution: true, imageRefField: "reference_image", imageRefKind: "array", videoRefField: "video_url", videoRefKind: "single"},
-		"happyhorse-1-1/text-to-video":      {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true},
-		"happyhorse-1-1/image-to-video":     {durationKind: "number", hasResolution: true, imageRefField: "image_urls", imageRefKind: "single_array"},
-		"happyhorse-1-1/reference-to-video": {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image", imageRefKind: "array"},
-
-		"hailuo/02-image-to-video-standard":  {durationKind: "string", hasResolution: true, resolutionKind: "hailuo_video", imageRefField: "image_url", imageRefKind: "single"},
-		"hailuo/02-image-to-video-pro":       {durationKind: "string", hasResolution: true, resolutionKind: "hailuo_video", imageRefField: "image_url", imageRefKind: "single"},
-		"hailuo/02-text-to-video-standard":   {durationKind: "string"},
-		"hailuo/02-text-to-video-pro":        {durationKind: "string"},
-		"hailuo/2-3-image-to-video-pro":      {durationKind: "string", hasResolution: true, resolutionKind: "hailuo_video", imageRefField: "image_url", imageRefKind: "single"},
-		"hailuo/2-3-image-to-video-standard": {durationKind: "string", hasResolution: true, resolutionKind: "hailuo_video", imageRefField: "image_url", imageRefKind: "single"},
-
-		"kling-2.6/image-to-video":            {durationKind: "string", imageRefField: "image_urls", imageRefKind: "array"},
-		"kling-2.6/text-to-video":             {aspectField: "aspect_ratio", durationKind: "string"},
-		"kling-2.6/motion-control":            {durationKind: "string", imageRefField: "input_urls", imageRefKind: "array", videoRefField: "video_urls", videoRefKind: "array"},
-		"kling-3.0/motion-control":            {durationKind: "string", imageRefField: "input_urls", imageRefKind: "array", videoRefField: "video_urls", videoRefKind: "array"},
-		"kling-3.0/video":                     {aspectField: "aspect_ratio", durationKind: "string", presetField: "mode", imageRefField: "image_urls", imageRefKind: "array"},
-		"kling/v3-turbo-text-to-video":        {aspectField: "aspect_ratio", durationKind: "string", hasResolution: true},
-		"kling/v3-turbo-image-to-video":       {durationKind: "string", hasResolution: true, imageRefField: "image_urls", imageRefKind: "array"},
-		"kling/ai-avatar-standard":            {imageRefField: "image_url", imageRefKind: "single", audioRefField: "audio_url", audioRefKind: "single"},
-		"kling/ai-avatar-pro":                 {imageRefField: "image_url", imageRefKind: "single", audioRefField: "audio_url", audioRefKind: "single"},
-		"kling/v2-1-master-image-to-video":    {durationKind: "string", imageRefField: "image_url", imageRefKind: "single"},
-		"kling/v2-1-master-text-to-video":     {aspectField: "aspect_ratio", durationKind: "string"},
-		"kling/v2-1-pro":                      {durationKind: "string", imageRefField: "image_url", imageRefKind: "single"},
-		"kling/v2-1-standard":                 {durationKind: "string", imageRefField: "image_url", imageRefKind: "single"},
-		"kling/v2-5-turbo-image-to-video-pro": {durationKind: "string", imageRefField: "image_url", imageRefKind: "single"},
-		"kling/v2-5-turbo-text-to-video-pro":  {aspectField: "aspect_ratio", durationKind: "string"},
-
-		"wan/2-2-a14b-image-to-video-turbo":  {hasResolution: true, imageRefField: "image_url", imageRefKind: "single"},
-		"wan/2-2-a14b-speech-to-video-turbo": {hasResolution: true, imageRefField: "image_url", imageRefKind: "single", audioRefField: "audio_url", audioRefKind: "single"},
-		"wan/2-2-a14b-text-to-video-turbo":   {aspectField: "aspect_ratio", hasResolution: true},
-		"wan/2-2-animate-move":               {hasResolution: true, imageRefField: "image_url", imageRefKind: "single", videoRefField: "video_url", videoRefKind: "single"},
-		"wan/2-2-animate-replace":            {hasResolution: true, imageRefField: "image_url", imageRefKind: "single", videoRefField: "video_url", videoRefKind: "single"},
-		"wan/2-5-image-to-video":             {durationKind: "string", hasResolution: true, imageRefField: "image_url", imageRefKind: "single"},
-		"wan/2-5-text-to-video":              {aspectField: "aspect_ratio", durationKind: "string", hasResolution: true},
-		"wan/2-6-flash-image-to-video":       {durationKind: "string", hasResolution: true, imageRefField: "image_urls", imageRefKind: "array"},
-		"wan/2-6-flash-video-to-video":       {durationKind: "string", hasResolution: true, videoRefField: "video_urls", videoRefKind: "array"},
-		"wan/2-6-image-to-video":             {durationKind: "string", hasResolution: true, imageRefField: "image_urls", imageRefKind: "array"},
-		"wan/2-6-text-to-video":              {durationKind: "string", hasResolution: true},
-		"wan/2-6-video-to-video":             {durationKind: "string", hasResolution: true, videoRefField: "video_urls", videoRefKind: "array"},
-		"wan/2-7-image-to-video":             {durationKind: "number", hasResolution: true, imageRefField: "first_frame_url", imageRefKind: "single", videoRefField: "first_clip_url", videoRefKind: "single", audioRefField: "driving_audio_url", audioRefKind: "single"},
-		"wan/2-7-r2v":                        {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image", imageRefKind: "array", videoRefField: "reference_video", videoRefKind: "array", audioRefField: "reference_voice", audioRefKind: "single"},
-		"wan/2-7-text-to-video":              {aspectField: "ratio", durationKind: "number", hasResolution: true, audioRefField: "audio_url", audioRefKind: "single"},
-		"wan/2-7-videoedit":                  {aspectField: "aspect_ratio", durationKind: "number", hasResolution: true, imageRefField: "reference_image", imageRefKind: "single", videoRefField: "video_url", videoRefKind: "single"},
-
-		"bytedance/seedream":                  {aspectField: "image_size", aspectKind: "image_size_named"},
-		"bytedance/seedream-v4-edit":          {aspectField: "image_size", aspectKind: "image_size_named", resolutionField: "image_resolution", resolutionKind: "image", countField: "max_images", imageRefField: "image_urls", imageRefKind: "array"},
-		"bytedance/seedream-v4-text-to-image": {aspectField: "image_size", aspectKind: "image_size_named", resolutionField: "image_resolution", resolutionKind: "image", countField: "max_images"},
-		"flux-2/flex-image-to-image":          {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", maxResolution: "2K", imageRefField: "input_urls", imageRefKind: "array"},
-		"flux-2/flex-text-to-image":           {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", maxResolution: "2K"},
-		"flux-2/pro-image-to-image":           {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", maxResolution: "2K", imageRefField: "input_urls", imageRefKind: "array"},
-		"flux-2/pro-text-to-image":            {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", maxResolution: "2K"},
-		"gpt-image-2-image-to-image":          {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", imageRefField: "input_urls", imageRefKind: "array"},
-		"gpt-image-2-text-to-image":           {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image"},
-		"nano-banana-2":                       {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", hasOutputFormat: true, imageRefField: "image_input", imageRefKind: "array"},
-		"nano-banana-2-lite":                  {aspectField: "aspect_ratio", imageRefField: "image_urls", imageRefKind: "array"},
-		"nano-banana-pro":                     {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", hasOutputFormat: true, imageRefField: "image_input", imageRefKind: "array"},
-		"wan/2-7-image":                       {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", countField: "n", imageRefField: "input_urls", imageRefKind: "array"},
-		"wan/2-7-image-pro":                   {aspectField: "aspect_ratio", hasResolution: true, resolutionKind: "image", countField: "n", imageRefField: "input_urls", imageRefKind: "array"},
-
-		"google/imagen4":                 {aspectField: "aspect_ratio"},
-		"google/imagen4-fast":            {aspectField: "aspect_ratio"},
-		"google/imagen4-ultra":           {aspectField: "aspect_ratio"},
-		"google/nano-banana":             {aspectField: "aspect_ratio", hasOutputFormat: true},
-		"google/nano-banana-edit":        {aspectField: "aspect_ratio", hasOutputFormat: true, imageRefField: "image_urls", imageRefKind: "array"},
-		"gpt-image/1.5-image-to-image":   {aspectField: "aspect_ratio", hasQuality: true, imageRefField: "input_urls", imageRefKind: "array"},
-		"gpt-image/1.5-text-to-image":    {aspectField: "aspect_ratio", hasQuality: true},
-		"grok-imagine/text-to-image":     {aspectField: "aspect_ratio"},
-		"grok-imagine/image-to-image":    {imageRefField: "image_urls", imageRefKind: "array"},
-		"grok-imagine/extend":            {imageRefField: "image_url", imageRefKind: "single"},
-		"ideogram/character":             {aspectField: "image_size", aspectKind: "image_size_named", countField: "num_images", countKind: "string", imageRefField: "reference_image_urls", imageRefKind: "array"},
-		"ideogram/character-edit":        {countField: "num_images", countKind: "string", imageRefField: "image_url", imageRefKind: "single"},
-		"ideogram/character-remix":       {aspectField: "image_size", aspectKind: "image_size_named", countField: "num_images", countKind: "string", imageRefField: "reference_image_urls", imageRefKind: "array"},
-		"ideogram/v3-edit":               {imageRefField: "image_url", imageRefKind: "single"},
-		"ideogram/v3-remix":              {aspectField: "image_size", aspectKind: "image_size_named", countField: "num_images", countKind: "string", imageRefField: "image_url", imageRefKind: "single"},
-		"ideogram/v3-text-to-image":      {aspectField: "image_size", aspectKind: "image_size_named"},
-		"qwen/text-to-image":             {aspectField: "image_size", aspectKind: "image_size_named", hasOutputFormat: true},
-		"qwen/image-edit":                {aspectField: "image_size", aspectKind: "image_size_named", countField: "num_images", countKind: "string", hasOutputFormat: true, imageRefField: "image_url", imageRefKind: "single"},
-		"qwen/image-to-image":            {hasOutputFormat: true, imageRefField: "image_url", imageRefKind: "single"},
-		"qwen2/image-edit":               {aspectField: "image_size", hasOutputFormat: true, imageRefField: "image_url", imageRefKind: "single"},
-		"qwen2/text-to-image":            {aspectField: "image_size", hasOutputFormat: true},
-		"recraft/crisp-upscale":          {imageRefField: "image", imageRefKind: "single"},
-		"recraft/remove-background":      {imageRefField: "image", imageRefKind: "single"},
-		"seedream/4.5-edit":              {aspectField: "aspect_ratio", hasQuality: true, imageRefField: "image_urls", imageRefKind: "array"},
-		"seedream/4.5-text-to-image":     {aspectField: "aspect_ratio", hasQuality: true},
-		"seedream/5-lite-image-to-image": {aspectField: "aspect_ratio", hasQuality: true, imageRefField: "image_urls", imageRefKind: "array"},
-		"seedream/5-lite-text-to-image":  {aspectField: "aspect_ratio", hasQuality: true},
-		"seedream/5-pro-text-to-image":  {aspectField: "aspect_ratio", hasQuality: true},
-		"seedream/5-pro-image-to-image": {aspectField: "aspect_ratio", hasQuality: true, imageRefField: "image_urls", imageRefKind: "array"},
-		"topaz/image-upscale":            {imageRefField: "image_url", imageRefKind: "single"},
-		"topaz/video-upscale":            {videoRefField: "video_url", videoRefKind: "single"},
-		"infinitalk/from-audio":          {hasResolution: true, imageRefField: "image_url", imageRefKind: "single", audioRefField: "audio_url", audioRefKind: "single"},
-		"z-image":                        {aspectField: "aspect_ratio"},
-	}
-
-	if config, ok := configs[modelName]; ok {
-		return config
-	}
-	return kieInputConfig{}
+	return kieModelInputConfigs[strings.ToLower(strings.TrimSpace(modelName))]
 }
 
 func normalizeKIEDurationInput(value any, config kieInputConfig) any {
@@ -948,6 +1179,9 @@ func normalizeKIEDurationInput(value any, config kieInputConfig) any {
 	}
 	duration, ok := readKIEDurationInt(normalized)
 	if !ok {
+		return normalized
+	}
+	if config.allowAutoDuration && duration == -1 {
 		return normalized
 	}
 	if config.durationMin > 0 && duration < config.durationMin {
@@ -1064,36 +1298,38 @@ func resolveKIEModelName(modelName string, payload map[string]any) string {
 	return trimmed
 }
 
+var kieModelAliasTable = map[string]string{
+	"seedream/seedream":                     "bytedance/seedream",
+	"seedream/seedream-v4-text-to-image":    "bytedance/seedream-v4-text-to-image",
+	"seedream/seedream-v4-edit":             "bytedance/seedream-v4-edit",
+	"seedream/4-5-text-to-image":            "seedream/4.5-text-to-image",
+	"seedream/4-5-edit":                     "seedream/4.5-edit",
+	"z-image/z-image":                       "z-image",
+	"google/nanobanana2":                    "nano-banana-2",
+	"google/nano-banana-2-lite":             "nano-banana-2-lite",
+	"google/pro-image-to-image":             "nano-banana-pro",
+	"flux2/pro-image-to-image":              "flux-2/pro-image-to-image",
+	"flux2/pro-text-to-image":               "flux-2/pro-text-to-image",
+	"flux2/flex-image-to-image":             "flux-2/flex-image-to-image",
+	"flux2/flex-text-to-image":              "flux-2/flex-text-to-image",
+	"gpt-image/1-5-text-to-image":           "gpt-image/1.5-text-to-image",
+	"gpt-image/1-5-image-to-image":          "gpt-image/1.5-image-to-image",
+	"gpt/gpt-image-2-text-to-image":         "gpt-image-2-text-to-image",
+	"gpt/gpt-image-2-image-to-image":        "gpt-image-2-image-to-image",
+	"bytedance/seedance-1-5-pro":            "bytedance/seedance-1.5-pro",
+	"kling/text-to-video":                   "kling-2.6/text-to-video",
+	"kling/image-to-video":                  "kling-2.6/image-to-video",
+	"kling/motion-control":                  "kling-2.6/motion-control",
+	"kling/motion-control-v3":               "kling-3.0/motion-control",
+	"kling/kling-3-0":                       "kling-3.0/video",
+	"kling/v25-turbo-image-to-video-pro":    "kling/v2-5-turbo-image-to-video-pro",
+	"kling/v25-turbo-text-to-video-pro":     "kling/v2-5-turbo-text-to-video-pro",
+	"grok-imagine/1-5-preview":              "grok-imagine-video-1-5-preview",
+	"grok-imagine/grok-imagine-1.5-preview": "grok-imagine-video-1-5-preview",
+}
+
 func kieModelAliases() map[string]string {
-	return map[string]string{
-		"seedream/seedream":                     "bytedance/seedream",
-		"seedream/seedream-v4-text-to-image":    "bytedance/seedream-v4-text-to-image",
-		"seedream/seedream-v4-edit":             "bytedance/seedream-v4-edit",
-		"seedream/4-5-text-to-image":            "seedream/4.5-text-to-image",
-		"seedream/4-5-edit":                     "seedream/4.5-edit",
-		"z-image/z-image":                       "z-image",
-		"google/nanobanana2":                    "nano-banana-2",
-		"google/nano-banana-2-lite":             "nano-banana-2-lite",
-		"google/pro-image-to-image":             "nano-banana-pro",
-		"flux2/pro-image-to-image":              "flux-2/pro-image-to-image",
-		"flux2/pro-text-to-image":               "flux-2/pro-text-to-image",
-		"flux2/flex-image-to-image":             "flux-2/flex-image-to-image",
-		"flux2/flex-text-to-image":              "flux-2/flex-text-to-image",
-		"gpt-image/1-5-text-to-image":           "gpt-image/1.5-text-to-image",
-		"gpt-image/1-5-image-to-image":          "gpt-image/1.5-image-to-image",
-		"gpt/gpt-image-2-text-to-image":         "gpt-image-2-text-to-image",
-		"gpt/gpt-image-2-image-to-image":        "gpt-image-2-image-to-image",
-		"bytedance/seedance-1-5-pro":            "bytedance/seedance-1.5-pro",
-		"kling/text-to-video":                   "kling-2.6/text-to-video",
-		"kling/image-to-video":                  "kling-2.6/image-to-video",
-		"kling/motion-control":                  "kling-2.6/motion-control",
-		"kling/motion-control-v3":               "kling-3.0/motion-control",
-		"kling/kling-3-0":                       "kling-3.0/video",
-		"kling/v25-turbo-image-to-video-pro":    "kling/v2-5-turbo-image-to-video-pro",
-		"kling/v25-turbo-text-to-video-pro":     "kling/v2-5-turbo-text-to-video-pro",
-		"grok-imagine/1-5-preview":              "grok-imagine-video-1-5-preview",
-		"grok-imagine/grok-imagine-1.5-preview": "grok-imagine-video-1-5-preview",
-	}
+	return kieModelAliasTable
 }
 
 func hasKIEImageInput(payload map[string]any) bool {
@@ -1167,7 +1403,7 @@ func copyKIEVideoResponse(w http.ResponseWriter, response *http.Response, reques
 		return false
 	}
 
-	if strings.Contains(request.URL.Path, "/jobs/createTask") {
+	if isKIECreateTaskPath(request.URL.Path) {
 		payload, _ := io.ReadAll(response.Body)
 		responseBody := string(payload)
 
@@ -1224,6 +1460,10 @@ func copyKIEVideoResponse(w http.ResponseWriter, response *http.Response, reques
 	}
 
 	return false
+}
+
+func isKIECreateTaskPath(path string) bool {
+	return strings.HasSuffix(path, "/jobs/createTask") || strings.HasSuffix(path, "/client/tasks")
 }
 
 func readKIECreateTaskErrorMessage(payload []byte) string {

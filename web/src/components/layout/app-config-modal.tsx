@@ -3,13 +3,20 @@
 import { App, Button, Form, Input, Modal, Segmented, Select, Switch } from "antd";
 import { useEffect, useState } from "react";
 
+import { ChannelModelSelectorModal } from "@/components/channel-model-selector-modal";
+import { GrokTtsVoiceSelect } from "@/components/grok-tts-voice-select";
 import { ModelPicker } from "@/components/model-picker";
 import { fetchImageModels } from "@/services/api/image";
 import { fetchUserConfig, measureUserStorageProvider, syncUserModelConfig, syncUserStorageProvider } from "@/services/api/user-config";
 import { clearStorageConfigCache as clearFileStorageCache } from "@/services/file-storage";
-import { clearStorageConfigCache as clearImageStorageCache, defaultUserStorageProvider, loadStorageConfig, saveUserStorageProvider, USER_STORAGE_PROVIDER_KEY, type UserStorageProvider } from "@/services/image-storage";
-import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
-import { filterModelsByCapability, normalizeLocalChannels, useConfigStore, useEffectiveConfig, type AiConfig, type LocalModelChannel, type ModelCapability } from "@/stores/use-config-store";
+import { clearStorageConfigCache as clearImageStorageCache, defaultUserStorageProvider, defaultUserWebDAVStorageProvider, loadStorageConfig, loadUserS3StorageProvider, loadUserWebDAVStorageProvider, saveUserStorageProvider, saveUserWebDAVStorageProvider, type UserStorageProvider } from "@/services/image-storage";
+import { audioFormatOptions, audioVoiceOptions, glmTtsFormatOptions, glmTtsVoiceOptions, isGlmTtsModel, normalizeAudioSpeedValue, normalizeGlmTtsFormat, normalizeGlmTtsSpeed, normalizeGlmTtsVoice } from "@/lib/audio-generation";
+import { grokTtsFormatOptions, grokTtsLanguageOptions, isGrok2APITtsConfig, normalizeGrokTtsFormat, normalizeGrokTtsLanguage, normalizeGrokTtsSpeed } from "@/lib/grok-tts";
+import { isGeminiConfig, isGeminiTtsModel } from "@/lib/gemini";
+import { geminiTtsVoiceOptions, normalizeGeminiTtsVoice } from "@/lib/gemini-tts";
+import { isMimoPresetTtsModel, isMimoTtsModel, isMimoVoiceCloneModel, isMimoVoiceDesignModel, mimoTtsFormatOptions, mimoTtsVoiceOptions } from "@/lib/mimo-tts";
+import { modelChannelApiKeyUrls, modelChannelDefaultBaseUrls, modelChannelProtocolOptions } from "@/lib/model-channel";
+import { filterChannelModelsByCapability, normalizeLocalChannels, useConfigStore, useEffectiveConfig, type AiConfig, type LocalModelChannel, type ModelCapability } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
 
 type ModelGroup = {
@@ -32,11 +39,15 @@ export function AppConfigModal() {
     const { message } = App.useApp();
     const [loadingModels, setLoadingModels] = useState(false);
     const [savingConfig, setSavingConfig] = useState(false);
+    const [modelSelectChannelId, setModelSelectChannelId] = useState("");
     const [remoteStorageSyncEnabled, setRemoteStorageSyncEnabled] = useState(false);
+    const [remoteWebDAVStorageSyncEnabled, setRemoteWebDAVStorageSyncEnabled] = useState(false);
     const [allowUserStorageProvider, setAllowUserStorageProvider] = useState(false);
-    const [userStorage, setUserStorage] = useState<UserStorageProvider>(() => defaultUserStorageProvider());
-    const [measuringStorage, setMeasuringStorage] = useState(false);
+    const [userStorage, setUserStorage] = useState(() => defaultUserStorageProvider());
+    const [userWebDAVStorage, setUserWebDAVStorage] = useState(() => defaultUserWebDAVStorageProvider());
+    const [measuringStorageType, setMeasuringStorageType] = useState<"s3" | "webdav" | null>(null);
     const [storageUsageText, setStorageUsageText] = useState("");
+    const [webDAVStorageUsageText, setWebDAVStorageUsageText] = useState("");
     const config = useConfigStore((state) => state.config);
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const isConfigOpen = useConfigStore((state) => state.isConfigOpen);
@@ -54,42 +65,43 @@ export function AppConfigModal() {
     const effectiveMode = canUseRemoteChannel ? (allowCustomChannel ? config.channelMode : "remote") : "local";
     const localModelConfig: AiConfig = effectiveMode === "local" && config.channelMode !== "local" ? { ...config, channelMode: "local" } : config;
     const modelConfig = effectiveMode === "remote" ? effectiveConfig : localModelConfig;
-    const canUseUserStorageProvider = isLoggedIn && allowUserStorageProvider;
+    const canUseUserStorageProvider = allowUserStorageProvider;
+    const glmTts = isGlmTtsModel(config.audioModel);
+    const grokTts = isGrok2APITtsConfig({ ...modelConfig, model: config.audioModel, audioModel: config.audioModel }, config.audioModel);
+    const geminiTts = isGeminiTtsModel(config.audioModel) && isGeminiConfig({ ...modelConfig, model: config.audioModel, audioModel: config.audioModel }, config.audioModel);
+    const modelSelectChannel = normalizeLocalChannels(config).find((channel) => channel.id === modelSelectChannelId);
 
     useEffect(() => {
-        try {
-            setUserStorage({ ...defaultUserStorageProvider(), ...JSON.parse(window.localStorage.getItem(USER_STORAGE_PROVIDER_KEY) || "{}") });
-        } catch {
-            setUserStorage(defaultUserStorageProvider());
-        }
+        setUserStorage(loadUserS3StorageProvider() || defaultUserStorageProvider());
+        setUserWebDAVStorage(loadUserWebDAVStorageProvider() || defaultUserWebDAVStorageProvider());
         if (!isConfigOpen || !token) return;
         let canceled = false;
         void fetchUserConfig(token)
             .then((payload) => {
                 if (canceled) return;
                 const remoteConfig = payload.modelConfig;
-                const shouldSync = remoteConfig?.syncModelConfig === true;
-                const shouldSyncStorage = remoteConfig?.syncStorageConfig === true;
-                setRemoteStorageSyncEnabled(shouldSyncStorage);
+                const syncS3 = remoteConfig?.syncStorageConfig === true;
+                const syncWebDAV = remoteConfig?.syncWebDAVStorageConfig === true;
+                setRemoteStorageSyncEnabled(syncS3);
+                setRemoteWebDAVStorageSyncEnabled(syncWebDAV);
                 if (remoteConfig) {
                     Object.entries(remoteConfig)
-                        .filter(([key]) => shouldSync || !["apiKey", "baseUrl", "localChannels"].includes(key))
                         .forEach(([key, value]) => updateConfig(key as keyof AiConfig, value as never));
-                } else {
-                    updateConfig("syncModelConfig", false);
                 }
-                updateConfig("syncStorageConfig", shouldSyncStorage);
-                if (shouldSyncStorage && payload.storageProvider) {
-                    const next = {
-                        ...defaultUserStorageProvider(),
-                        ...payload.storageProvider,
-                        enabled: payload.storageProvider.enabled !== undefined ? payload.storageProvider.enabled : true,
-                    };
+                updateConfig("syncStorageConfig", syncS3);
+                updateConfig("syncWebDAVStorageConfig", syncWebDAV);
+                if (syncS3 && payload.storageProvider?.s3) {
+                    const next = { ...defaultUserStorageProvider(), ...payload.storageProvider.s3, type: "s3" as const };
                     setUserStorage(next);
                     saveUserStorageProvider(next);
                 }
+                if (syncWebDAV && payload.storageProvider?.webdav) {
+                    const next = { ...defaultUserWebDAVStorageProvider(), ...payload.storageProvider.webdav, type: "webdav" as const };
+                    setUserWebDAVStorage(next);
+                    saveUserWebDAVStorageProvider(next);
+                }
             })
-            .catch(() => {});
+            .catch(() => { });
         return () => {
             canceled = true;
         };
@@ -113,35 +125,35 @@ export function AppConfigModal() {
     const finishConfig = async () => {
         const localIncomplete = effectiveMode === "local" && normalizeLocalChannels(config).some((channel) => !channel.baseUrl.trim() || !channel.apiKey.trim());
         const modelIncomplete = !modelConfig.imageModel.trim() || !modelConfig.videoModel.trim() || !modelConfig.textModel.trim();
+        if (userStorage.enabled && userWebDAVStorage.enabled) {
+            message.error("S3/R2 与 WebDAV 不能同时启用");
+            return;
+        }
         if (!canUseRemoteChannel && config.channelMode !== "local") updateConfig("channelMode", "local");
         else if (canUseRemoteChannel && !allowCustomChannel && config.channelMode !== "remote") updateConfig("channelMode", "remote");
-        if (canUseUserStorageProvider) saveUserStorageProvider(userStorage);
+        if (canUseUserStorageProvider) {
+            saveUserStorageProvider(userStorage);
+            saveUserWebDAVStorageProvider(userWebDAVStorage);
+        }
         setSavingConfig(true);
         try {
             if (token) {
                 const configToSave = effectiveMode === "local" && config.channelMode !== "local" ? { ...config, channelMode: "local" as const } : config;
-                const shouldSaveLocalSecrets = effectiveMode === "local" && config.syncModelConfig;
-                await syncUserModelConfig(
-                    token,
-                    shouldSaveLocalSecrets
-                        ? configToSave
-                        : {
-                              ...configToSave,
-                              channelMode: canUseRemoteChannel ? "remote" : "local",
-                              apiKey: "",
-                              baseUrl: "",
-                              localChannels: [],
-                          },
-                );
+                await syncUserModelConfig(token, configToSave);
             }
-            if (token && canUseUserStorageProvider && (config.syncStorageConfig || remoteStorageSyncEnabled)) {
-                await syncUserStorageProvider(token, config.syncStorageConfig ? userStorage : { ...userStorage, enabled: false, endpoint: "", bucket: "", accessKeyId: "", secretAccessKey: "" });
+            const providers = {
+                ...(config.syncStorageConfig || remoteStorageSyncEnabled ? { s3: config.syncStorageConfig ? userStorage : { ...userStorage, enabled: false, endpoint: "", bucket: "", accessKeyId: "", secretAccessKey: "" } } : {}),
+                ...(config.syncWebDAVStorageConfig || remoteWebDAVStorageSyncEnabled ? { webdav: config.syncWebDAVStorageConfig ? userWebDAVStorage : { ...userWebDAVStorage, enabled: false, endpoint: "", username: "", password: "" } } : {}),
+            };
+            if (token && canUseUserStorageProvider && Object.keys(providers).length) {
+                await syncUserStorageProvider(token, providers);
                 setRemoteStorageSyncEnabled(config.syncStorageConfig);
+                setRemoteWebDAVStorageSyncEnabled(config.syncWebDAVStorageConfig);
             }
             clearImageStorageCache();
             clearFileStorageCache();
             setConfigDialogOpen(false);
-            if ((config.syncModelConfig || config.syncStorageConfig) && !token) message.warning("请登录后再同步配置");
+            if ((config.syncStorageConfig || config.syncWebDAVStorageConfig) && !token) message.warning("请登录后再同步配置");
             else if (localIncomplete || modelIncomplete) message.warning("部分模型或本地渠道密钥尚未配置完整，配置已保存");
             else message.success(shouldPromptContinue ? "配置已保存，请继续刚才的请求" : "配置已保存");
             clearPromptContinue();
@@ -161,11 +173,14 @@ export function AppConfigModal() {
         }
         setLoadingModels(true);
         try {
-            const nextChannels = await Promise.all(channels.map(async (channel) => ({ ...channel, models: await fetchImageModels(configForLocalChannel(config, channel)) })));
-            updateLocalChannels(nextChannels);
-            message.success("模型列表已更新");
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : "读取模型失败");
+            const results = await Promise.allSettled(channels.map(async (channel) => fetchImageModels(configForLocalChannel(config, channel))));
+            updateLocalChannels(channels.map((channel, index) => {
+                const result = results[index];
+                return result.status === "fulfilled" ? { ...channel, models: result.value } : channel;
+            }));
+            const failedCount = results.filter((result) => result.status === "rejected").length;
+            if (failedCount) message.warning(`${failedCount} 个渠道拉取失败，已保留原有模型，可在“选择”中手动增加模型`);
+            else message.success("模型列表已更新");
         } finally {
             setLoadingModels(false);
         }
@@ -174,10 +189,10 @@ export function AppConfigModal() {
     const updateLocalChannels = (channels: LocalModelChannel[]) => {
         const normalized = channels.length ? channels : normalizeLocalChannels({ baseUrl: config.baseUrl, apiKey: config.apiKey, models: config.models });
         const models = uniqueModels(normalized.flatMap((channel) => channel.models));
-        const nextImageModels = filterModelsByCapability(models, "image");
-        const nextVideoModels = filterModelsByCapability(models, "video");
-        const nextTextModels = filterModelsByCapability(models, "text");
-        const nextAudioModels = filterModelsByCapability(models, "audio");
+        const nextImageModels = filterChannelModelsByCapability(normalized, "image");
+        const nextVideoModels = filterChannelModelsByCapability(normalized, "video");
+        const nextTextModels = filterChannelModelsByCapability(normalized, "text");
+        const nextAudioModels = filterChannelModelsByCapability(normalized, "audio");
         const imageModel = nextImageModels.includes(config.imageModel) ? config.imageModel : nextImageModels[0] || "";
         const videoModel = nextVideoModels.includes(config.videoModel) ? config.videoModel : nextVideoModels[0] || "";
         const textModel = nextTextModels.includes(config.textModel) ? config.textModel : nextTextModels[0] || "";
@@ -205,54 +220,68 @@ export function AppConfigModal() {
     };
 
     const addLocalChannel = () => {
-        updateLocalChannels([...normalizeLocalChannels(config), { id: "local-" + Date.now(), name: "新渠道", baseUrl: "", apiKey: "", models: [] }]);
+        updateLocalChannels([...normalizeLocalChannels(config), { id: "local-" + Date.now(), protocol: "openai", name: "新渠道", baseUrl: modelChannelDefaultBaseUrls.openai, apiKey: "", models: [] }]);
     };
 
     const removeLocalChannel = (id: string) => {
         updateLocalChannels(normalizeLocalChannels(config).filter((channel) => channel.id !== id));
     };
 
-    const refreshLocalChannelModels = async (channel: LocalModelChannel) => {
-        if (!channel.baseUrl.trim() || !channel.apiKey.trim()) {
+    const openLocalModelSelector = (channel: LocalModelChannel) => setModelSelectChannelId(channel.id);
+
+    const closeLocalModelSelector = () => setModelSelectChannelId("");
+
+    const confirmLocalModelSelector = (models: string[]) => {
+        if (!modelSelectChannelId) return;
+        patchLocalChannel(modelSelectChannelId, { models });
+        closeLocalModelSelector();
+    };
+
+    const fetchLocalModelList = async () => {
+        if (!modelSelectChannel) return;
+        if (!modelSelectChannel.baseUrl.trim() || !modelSelectChannel.apiKey.trim()) {
             message.error("请先填写该渠道的 Base URL 和 API Key");
             return;
         }
-        setLoadingModels(true);
-        try {
-            patchLocalChannel(channel.id, { models: await fetchImageModels(configForLocalChannel(config, channel)) });
-            message.success("模型列表已更新");
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : "读取模型失败");
-        } finally {
-            setLoadingModels(false);
-        }
+        return uniqueModels(await fetchImageModels(configForLocalChannel(config, modelSelectChannel)));
     };
 
 
-    const measureStorage = async () => {
+    const measureStorage = async (provider: UserStorageProvider) => {
         if (!token) {
             message.warning("请先登录后再统计容量");
             return;
         }
-        setMeasuringStorage(true);
+        setMeasuringStorageType(provider.type);
         try {
-            const result = await measureUserStorageProvider(token, userStorage);
-            setStorageUsageText(`${formatBytes(result.bytes)} / ${formatBytes(result.limitBytes)}${result.overLimit ? "，已达到上限" : ""}`);
-            if (result.overLimit) {
-                const next = { ...userStorage, enabled: false };
-                setUserStorage(next);
-                saveUserStorageProvider(next);
+            const result = await measureUserStorageProvider(token, provider);
+            const usageText = formatBytes(result.bytes) + " / " + formatBytes(result.limitBytes) + (result.overLimit ? "，已达到上限" : "");
+            if (provider.type === "webdav") {
+                setWebDAVStorageUsageText(usageText);
+                if (result.overLimit) {
+                    const next = { ...userWebDAVStorage, enabled: false };
+                    setUserWebDAVStorage(next);
+                    saveUserWebDAVStorageProvider(next);
+                }
+            } else {
+                setStorageUsageText(usageText);
+                if (result.overLimit) {
+                    const next = { ...userStorage, enabled: false };
+                    setUserStorage(next);
+                    saveUserStorageProvider(next);
+                }
             }
             message.success("容量统计完成");
         } catch (error) {
             message.error(error instanceof Error ? error.message : "容量统计失败");
         } finally {
-            setMeasuringStorage(false);
+            setMeasuringStorageType(null);
         }
     };
 
     return (
-        <Modal
+        <>
+            <Modal
             title={
                 <div>
                     <div className="text-lg font-semibold">配置与用户偏好</div>
@@ -300,17 +329,29 @@ export function AppConfigModal() {
                                 </div>
                                 {normalizeLocalChannels(config).map((channel, index) => (
                                     <div key={channel.id} className="space-y-2 rounded-md bg-stone-50 p-2 dark:bg-stone-900">
-                                        <div className="grid gap-2 md:grid-cols-[160px_minmax(0,1fr)_minmax(0,1fr)_auto]">
+                                        <div className="grid gap-2 md:grid-cols-[130px_150px_minmax(0,1fr)_minmax(0,1fr)_auto]">
                                             <Input value={channel.name} placeholder="渠道名称" onChange={(event) => patchLocalChannel(channel.id, { name: event.target.value })} />
+                                            <Select
+                                                value={channel.protocol}
+                                                options={modelChannelProtocolOptions}
+                                                onChange={(protocol: LocalModelChannel["protocol"]) => patchLocalChannel(channel.id, { protocol, baseUrl: modelChannelDefaultBaseUrls[protocol] })}
+                                            />
                                             <Input value={channel.baseUrl} placeholder="Base URL" onChange={(event) => patchLocalChannel(channel.id, { baseUrl: event.target.value })} />
                                             <Input.Password value={channel.apiKey} placeholder="API Key" onChange={(event) => patchLocalChannel(channel.id, { apiKey: event.target.value })} />
-                                            <div className="flex gap-2">
-                                                <Button size="small" loading={loadingModels} onClick={() => void refreshLocalChannelModels(channel)}>
-                                                    拉取
+                                            <div className="relative flex flex-wrap gap-2 md:flex-nowrap">
+                                                <Button size="small" onClick={() => openLocalModelSelector(channel)}>
+                                                    选择
                                                 </Button>
                                                 <Button size="small" danger disabled={index === 0 && normalizeLocalChannels(config).length === 1} onClick={() => removeLocalChannel(channel.id)}>
                                                     删除
                                                 </Button>
+                                                {modelChannelApiKeyUrls[channel.protocol] ? (
+                                                    <div className="w-full md:absolute md:left-0 md:top-8">
+                                                        <Button block type="primary" size="small" href={modelChannelApiKeyUrls[channel.protocol]} target="_blank">
+                                                            获取 API Key
+                                                        </Button>
+                                                    </div>
+                                                ) : null}
                                             </div>
                                         </div>
                                         <div className="text-xs text-stone-500">已保存 {channel.models.length} 个模型</div>
@@ -323,8 +364,6 @@ export function AppConfigModal() {
                                     <div className="mt-1 text-xs text-stone-500">当前已保存 {config.models.length} 个模型</div>
                                 </div>
                                 <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-                                    <span className="text-xs text-stone-500">自动同步</span>
-                                    <Switch size="small" checked={config.syncModelConfig} onChange={(checked) => updateConfig("syncModelConfig", checked)} />
                                     <Button size="small" loading={loadingModels} onClick={() => void refreshModels()}>
                                         拉取全部渠道
                                     </Button>
@@ -355,23 +394,46 @@ export function AppConfigModal() {
                                 onBlur={(event) => updateConfig("canvasImageCount", normalizeImageCount(event.target.value))}
                             />
                         </Form.Item>
-                        <Form.Item label="默认音频声音" className="mb-4">
-                            <Select value={config.audioVoice} options={audioVoiceOptions} onChange={(value) => updateConfig("audioVoice", value)} />
-                        </Form.Item>
-                        <Form.Item label="默认音频格式" className="mb-4">
-                            <Select value={config.audioFormat} options={audioFormatOptions} onChange={(value) => updateConfig("audioFormat", value)} />
-                        </Form.Item>
-                        <Form.Item label="默认音频语速" className="mb-4">
-                            <Input
-                                type="number"
-                                min={0.25}
-                                max={4}
-                                step={0.05}
-                                value={config.audioSpeed}
-                                onChange={(event) => updateConfig("audioSpeed", event.target.value)}
-                                onBlur={(event) => updateConfig("audioSpeed", normalizeAudioSpeedValue(event.target.value))}
-                            />
-                        </Form.Item>
+                        {geminiTts ? (
+                            <Form.Item label="默认 Gemini 音色" className="mb-4">
+                                <Select showSearch optionFilterProp="label" value={normalizeGeminiTtsVoice(config.geminiTtsVoice)} options={geminiTtsVoiceOptions} onChange={(value) => updateConfig("geminiTtsVoice", value)} />
+                            </Form.Item>
+                        ) : isMimoPresetTtsModel(config.audioModel) ? (
+                            <Form.Item label="默认 MiMo 音色" className="mb-4">
+                                <Select value={config.mimoTtsVoice} options={[...mimoTtsVoiceOptions]} onChange={(value) => updateConfig("mimoTtsVoice", value)} />
+                            </Form.Item>
+                        ) : isMimoVoiceDesignModel(config.audioModel) ? (
+                            <Form.Item label="默认音色描述" className="mb-4">
+                                <Input value={config.mimoVoiceDesignPrompt} placeholder="例如：年轻女性，声音清亮自然，有亲和力。" onChange={(event) => updateConfig("mimoVoiceDesignPrompt", event.target.value)} />
+                            </Form.Item>
+                        ) : isMimoTtsModel(config.audioModel) ? null : (
+                            <Form.Item label="默认音频声音" className="mb-4">
+                                {grokTts ? <GrokTtsVoiceSelect config={modelConfig} model={config.audioModel} value={config.grokTtsVoice} enabled={isConfigOpen} onChange={(value) => updateConfig("grokTtsVoice", value)} /> : <Select value={glmTts ? normalizeGlmTtsVoice(config.glmTtsVoice) : config.audioVoice} options={glmTts ? glmTtsVoiceOptions : audioVoiceOptions} onChange={(value) => updateConfig(glmTts ? "glmTtsVoice" : "audioVoice", value)} />}
+                            </Form.Item>
+                        )}
+                        {grokTts ? (
+                            <Form.Item label="默认音频语言" className="mb-4">
+                                <Select value={normalizeGrokTtsLanguage(config.grokTtsLanguage)} options={grokTtsLanguageOptions} showSearch optionFilterProp="label" onChange={(value) => updateConfig("grokTtsLanguage", value)} />
+                            </Form.Item>
+                        ) : null}
+                        {!geminiTts ? (
+                            <Form.Item label="默认音频格式" className="mb-4">
+                                <Select value={isMimoTtsModel(config.audioModel) ? config.mimoTtsFormat : glmTts ? normalizeGlmTtsFormat(config.glmTtsFormat) : grokTts ? normalizeGrokTtsFormat(config.grokTtsFormat) : config.audioFormat} options={isMimoTtsModel(config.audioModel) ? [...mimoTtsFormatOptions] : glmTts ? glmTtsFormatOptions : grokTts ? grokTtsFormatOptions : audioFormatOptions} onChange={(value) => isMimoTtsModel(config.audioModel) ? updateConfig("mimoTtsFormat", value) : updateConfig(glmTts ? "glmTtsFormat" : grokTts ? "grokTtsFormat" : "audioFormat", value)} />
+                            </Form.Item>
+                        ) : null}
+                        {!geminiTts && !isMimoTtsModel(config.audioModel) ? (
+                            <Form.Item label="默认音频语速" className="mb-4">
+                                <Input
+                                    type="number"
+                                    min={glmTts ? 0.5 : grokTts ? 0.7 : 0.25}
+                                    max={glmTts ? 2 : grokTts ? 1.5 : 4}
+                                    step={0.05}
+                                    value={glmTts ? config.glmTtsSpeed : grokTts ? config.grokTtsSpeed : config.audioSpeed}
+                                    onChange={(event) => updateConfig(glmTts ? "glmTtsSpeed" : grokTts ? "grokTtsSpeed" : "audioSpeed", event.target.value)}
+                                    onBlur={(event) => updateConfig(glmTts ? "glmTtsSpeed" : grokTts ? "grokTtsSpeed" : "audioSpeed", glmTts ? normalizeGlmTtsSpeed(event.target.value) : grokTts ? normalizeGrokTtsSpeed(event.target.value) : normalizeAudioSpeedValue(event.target.value))}
+                                />
+                            </Form.Item>
+                        ) : null}
                     </div>
                     <div className="mb-4 grid gap-3 md:grid-cols-3">
                         <FeatureSwitch title="流式传输" description="开启后请求中追加 stream，支持读取中间图片事件并避免长时间无数据。" checked={Boolean(config.streamImages)} onChange={(checked) => updateConfig("streamImages", checked ? "1" : "")} />
@@ -379,38 +441,73 @@ export function AppConfigModal() {
                         <FeatureSwitch title="Codex CLI 兼容模式" description="开启后减少不兼容参数，并追加防提示词改写前缀。" checked={Boolean(config.codexCli)} onChange={(checked) => updateConfig("codexCli", checked ? "1" : "")} />
                     </div>
                     {canUseUserStorageProvider ? (
-                        <section className="mb-5 mt-4 rounded-xl border border-stone-200 bg-stone-50/70 p-3 dark:border-stone-800 dark:bg-stone-900/50">
-                            <div className="flex items-center justify-between gap-3">
-                                <div>
-                                    <div className="text-sm font-medium">用户 S3/R2 存储</div>
-                                    <div className="mt-1 text-xs text-stone-500">开启后，新生成图片和媒体文件会优先保存到你的 S3 兼容对象存储。{storageUsageText ? `当前容量：${storageUsageText}` : ""}</div>
+                        <>
+                            <section className="mb-5 mt-4 rounded-xl border border-stone-200 bg-stone-50/70 p-3 dark:border-stone-800 dark:bg-stone-900/50">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                        <div className="text-sm font-medium">用户 S3/R2 存储</div>
+                                        <div className="mt-1 text-xs text-stone-500">
+                                            开启后，新生成图片和媒体文件会优先保存到你的 S3 兼容对象存储。
+                                            {storageUsageText ? <>当前容量：{storageUsageText}</> : null}
+                                        </div>
+                                    </div>
+                                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                                        <Button size="small" loading={measuringStorageType === "s3"} onClick={() => void measureStorage(userStorage)}>
+                                            统计容量
+                                        </Button>
+                                        <span className="text-xs text-stone-500">自动同步</span>
+                                        <Switch size="small" checked={config.syncStorageConfig} onChange={(checked) => updateConfig("syncStorageConfig", checked)} />
+                                        <Switch checked={userStorage.enabled} disabled={userWebDAVStorage.enabled} onChange={(enabled) => setUserStorage((value) => ({ ...value, enabled }))} />
+                                    </div>
                                 </div>
-                                <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-                                    <Button size="small" loading={measuringStorage} onClick={() => void measureStorage()}>
-                                        统计容量
-                                    </Button>
-                                    <span className="text-xs text-stone-500">自动同步</span>
-                                    <Switch size="small" checked={config.syncStorageConfig} onChange={(checked) => updateConfig("syncStorageConfig", checked)} />
-                                    <Switch checked={userStorage.enabled} onChange={(enabled) => setUserStorage((value) => ({ ...value, enabled }))} />
+                                {userStorage.enabled ? (
+                                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                                        <Input value={userStorage.name} placeholder="配置名称" onChange={(event) => setUserStorage((value) => ({ ...value, name: event.target.value }))} />
+                                        <Input value={userStorage.endpoint} placeholder="Endpoint，例如 https://<account>.r2.cloudflarestorage.com" onChange={(event) => setUserStorage((value) => ({ ...value, endpoint: event.target.value }))} />
+                                        <Input value={userStorage.region} placeholder="Region，R2 通常为 auto" onChange={(event) => setUserStorage((value) => ({ ...value, region: event.target.value }))} />
+                                        <Input value={userStorage.bucket} placeholder="Bucket 名称" onChange={(event) => setUserStorage((value) => ({ ...value, bucket: event.target.value }))} />
+                                        <Input value={userStorage.accessKeyId} placeholder="Access Key ID" onChange={(event) => setUserStorage((value) => ({ ...value, accessKeyId: event.target.value }))} />
+                                        <Input.Password value={userStorage.secretAccessKey} placeholder="Secret Access Key" onChange={(event) => setUserStorage((value) => ({ ...value, secretAccessKey: event.target.value }))} />
+                                        <Input value={userStorage.publicBaseUrl} placeholder="公开访问地址，例如 https://pub-xxx.r2.dev" onChange={(event) => setUserStorage((value) => ({ ...value, publicBaseUrl: event.target.value }))} />
+                                        <Input value={userStorage.pathPrefix} placeholder="保存路径前缀，例如 images" onChange={(event) => setUserStorage((value) => ({ ...value, pathPrefix: event.target.value }))} />
+                                    </div>
+                                ) : null}
+                            </section>
+                            <section className="mb-5 mt-4 rounded-xl border border-stone-200 bg-stone-50/70 p-3 dark:border-stone-800 dark:bg-stone-900/50">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                        <div className="text-sm font-medium">WebDAV 存储</div>
+                                        <div className="mt-1 text-xs text-stone-500">
+                                            开启后，新生成图片和媒体文件会优先保存到你的 WebDAV。
+                                            {webDAVStorageUsageText ? <>当前容量：{webDAVStorageUsageText}</> : null}
+                                        </div>
+                                    </div>
+                                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                                        <Button size="small" loading={measuringStorageType === "webdav"} onClick={() => void measureStorage(userWebDAVStorage)}>
+                                            统计容量
+                                        </Button>
+                                        <span className="text-xs text-stone-500">自动同步</span>
+                                        <Switch size="small" checked={config.syncWebDAVStorageConfig} onChange={(checked) => updateConfig("syncWebDAVStorageConfig", checked)} />
+                                        <Switch checked={userWebDAVStorage.enabled} disabled={userStorage.enabled} onChange={(enabled) => setUserWebDAVStorage((value) => ({ ...value, enabled }))} />
+                                    </div>
                                 </div>
-                            </div>
-                            {userStorage.enabled ? (
-                                <div className="mt-3 grid gap-3 md:grid-cols-2">
-                                    <Input value={userStorage.name} placeholder="配置名称" onChange={(event) => setUserStorage((value) => ({ ...value, name: event.target.value }))} />
-                                    <Input value={userStorage.endpoint} placeholder="Endpoint，例如 https://<account>.r2.cloudflarestorage.com" onChange={(event) => setUserStorage((value) => ({ ...value, endpoint: event.target.value }))} />
-                                    <Input value={userStorage.region} placeholder="Region，R2 通常为 auto" onChange={(event) => setUserStorage((value) => ({ ...value, region: event.target.value }))} />
-                                    <Input value={userStorage.bucket} placeholder="Bucket 名称" onChange={(event) => setUserStorage((value) => ({ ...value, bucket: event.target.value }))} />
-                                    <Input value={userStorage.accessKeyId} placeholder="Access Key ID" onChange={(event) => setUserStorage((value) => ({ ...value, accessKeyId: event.target.value }))} />
-                                    <Input.Password value={userStorage.secretAccessKey} placeholder="Secret Access Key" onChange={(event) => setUserStorage((value) => ({ ...value, secretAccessKey: event.target.value }))} />
-                                    <Input value={userStorage.publicBaseUrl} placeholder="公开访问地址，例如 https://pub-xxx.r2.dev" onChange={(event) => setUserStorage((value) => ({ ...value, publicBaseUrl: event.target.value }))} />
-                                    <Input value={userStorage.pathPrefix} placeholder="保存路径前缀，例如 images" onChange={(event) => setUserStorage((value) => ({ ...value, pathPrefix: event.target.value }))} />
-                                </div>
-                            ) : null}
-                        </section>
+                                {userWebDAVStorage.enabled ? (
+                                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                                        <Input value={userWebDAVStorage.name} placeholder="配置名称" onChange={(event) => setUserWebDAVStorage((value) => ({ ...value, name: event.target.value }))} />
+                                        <Input value={userWebDAVStorage.endpoint} placeholder="WebDAV 地址" onChange={(event) => setUserWebDAVStorage((value) => ({ ...value, endpoint: event.target.value }))} />
+                                        <Input value={userWebDAVStorage.pathPrefix} placeholder="远程目录" onChange={(event) => setUserWebDAVStorage((value) => ({ ...value, pathPrefix: event.target.value }))} />
+                                        <Input value={userWebDAVStorage.username} placeholder="用户名" onChange={(event) => setUserWebDAVStorage((value) => ({ ...value, username: event.target.value }))} />
+                                        <Input.Password value={userWebDAVStorage.password} placeholder="密码 / 应用密码" onChange={(event) => setUserWebDAVStorage((value) => ({ ...value, password: event.target.value }))} />
+                                    </div>
+                                ) : null}
+                            </section>
+                        </>
                     ) : null}
-                    <Form.Item label="默认音频指令" className="mb-4">
-                        <Input.TextArea rows={2} value={config.audioInstructions} placeholder="例如：自然、温暖、适合旁白。" onChange={(event) => updateConfig("audioInstructions", event.target.value)} />
-                    </Form.Item>
+                    {(!isMimoTtsModel(config.audioModel) || isMimoPresetTtsModel(config.audioModel) || isMimoVoiceCloneModel(config.audioModel)) && !glmTts && !grokTts ? (
+                        <Form.Item label="默认音频指令" className="mb-4">
+                            <Input.TextArea rows={2} value={config.audioInstructions} placeholder="例如：自然、温暖、适合旁白。" onChange={(event) => updateConfig("audioInstructions", event.target.value)} />
+                        </Form.Item>
+                    ) : null}
                     {effectiveMode === "local" ? (
                         <Form.Item label="系统提示词" className="mb-0">
                             <Input.TextArea rows={3} value={config.systemPrompt} placeholder="例如：你是一位擅长电影感写实摄影的视觉导演。" onChange={(event) => updateConfig("systemPrompt", event.target.value)} />
@@ -418,7 +515,17 @@ export function AppConfigModal() {
                     ) : null}
                 </Form>
             </div>
-        </Modal>
+            </Modal>
+            {modelSelectChannel ? (
+                <ChannelModelSelectorModal
+                    channel={modelSelectChannel}
+                    models={modelSelectChannel.models}
+                    onCancel={closeLocalModelSelector}
+                    onConfirm={confirmLocalModelSelector}
+                    onFetchModels={fetchLocalModelList}
+                />
+            ) : null}
+        </>
     );
 }
 

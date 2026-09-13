@@ -52,6 +52,9 @@ func SaveSettings(settings model.Settings) (model.Settings, error) {
 	keepPrivateAPIKeys(&settings, normalizeSettings(saved))
 	keepPrivateAuthSecrets(&settings, normalizeSettings(saved))
 	keepPrivateStorageSecrets(&settings, normalizeSettings(saved))
+	if err := validateEnabledStorageProviderTypes(settings.Private.Storage.Providers); err != nil {
+		return model.Settings{}, err
+	}
 	result, err := repository.SaveSettings(settings, now())
 	if err == nil {
 		RefreshPromptSyncScheduler()
@@ -74,8 +77,8 @@ func AdminTestChannelModel(index *int, channel model.ModelChannel, modelName str
 	if err != nil {
 		return "", err
 	}
-	if isArkAgentPlanChannel(resolved) || isSeedanceModelName(modelName) {
-		return testArkSeedanceChannelModel(resolved, modelName)
+	if adapter, ok := matchModelProtocol(modelConfigTestRules, resolved, modelName); ok {
+		return adapter.testModel(resolved, modelName)
 	}
 	return testAdminChannelModel(resolved, modelName)
 }
@@ -103,7 +106,7 @@ func DefaultSystemPrompts() model.SystemPromptSetting {
 2. 变量名使用 snake_case，label 使用中文。
 3. promptTemplate 必须使用 {{variable_name}} 引用变量。
 4. 如果用户需要"多张、系列、组图、文章配图、海报组、写真组、方案集"，mode 使用 multi_image_series；否则使用 single_image。
-5. config 只输出必要配置，apiMode 可为 responses 或 images。
+5. config 只输出必要配置，apiMode 可为 responses、images 或 chat。
 6. variables 支持 text、textarea、number、select、boolean。
 7. select 类型的 options 必须是字符串数组。
 8. 多图工作流必须输出 seriesConfig，用于先生成多条图片提示词草稿。
@@ -236,6 +239,7 @@ func hidePrivateAPIKeys(settings model.Settings) model.Settings {
 	}
 	for i := range settings.Private.Storage.Providers {
 		settings.Private.Storage.Providers[i].SecretAccessKey = ""
+		settings.Private.Storage.Providers[i].Password = ""
 	}
 	settings.Private.Auth.LinuxDo.ClientSecret = ""
 	return settings
@@ -314,9 +318,13 @@ func HTTPClientForChannel(channel model.ModelChannel) *http.Client {
 }
 
 func BuildModelChannelURL(channel model.ModelChannel, path string) string {
+	return modelProtocolForChannel(channel).buildURL(channel, path)
+}
+
+func buildOpenAIModelChannelURL(channel model.ModelChannel, path string) string {
 	baseURL := normalizeModelChannelBaseURL(channel.BaseURL)
 	lowerBaseURL := strings.ToLower(baseURL)
-	if !strings.HasSuffix(lowerBaseURL, "/v1") && !strings.HasSuffix(lowerBaseURL, "/api/v3") && !strings.HasSuffix(lowerBaseURL, "/api/plan/v3") {
+	if !strings.HasSuffix(lowerBaseURL, "/v1") && !strings.HasSuffix(lowerBaseURL, "/api/v3") && !strings.HasSuffix(lowerBaseURL, "/api/plan/v3") && !strings.HasSuffix(lowerBaseURL, "/api/paas/v4") {
 		baseURL += "/v1"
 	}
 	return baseURL + path
@@ -328,14 +336,16 @@ func normalizeModelChannelBaseURL(baseURL string) string {
 	if err == nil && parsed.Scheme != "" && parsed.Host != "" {
 		path := strings.TrimRight(parsed.Path, "/")
 		lowerPath := strings.ToLower(path)
-		if index := strings.Index(lowerPath, "/api/plan/v3"); index >= 0 {
-			end := index + len("/api/plan/v3")
-			if len(lowerPath) == end || lowerPath[end] == '/' {
-				parsed.Path = path[:end]
-				parsed.RawPath = ""
-				parsed.RawQuery = ""
-				parsed.Fragment = ""
-				return strings.TrimRight(parsed.String(), "/")
+		for _, versionPath := range []string{"/api/plan/v3", "/api/paas/v4"} {
+			if index := strings.Index(lowerPath, versionPath); index >= 0 {
+				end := index + len(versionPath)
+				if len(lowerPath) == end || lowerPath[end] == '/' {
+					parsed.Path = path[:end]
+					parsed.RawPath = ""
+					parsed.RawQuery = ""
+					parsed.Fragment = ""
+					return strings.TrimRight(parsed.String(), "/")
+				}
 			}
 		}
 	}
@@ -343,13 +353,11 @@ func normalizeModelChannelBaseURL(baseURL string) string {
 }
 
 func isArkAgentPlanChannel(channel model.ModelChannel) bool {
+	if !IsArkChannel(channel) {
+		return false
+	}
 	baseURL := strings.ToLower(normalizeModelChannelBaseURL(channel.BaseURL))
 	return strings.HasSuffix(baseURL, "/api/plan/v3")
-}
-
-func isSeedanceModelName(modelName string) bool {
-	modelName = strings.ToLower(strings.TrimSpace(modelName))
-	return strings.Contains(modelName, "seedance") || strings.Contains(modelName, "doubao-seedance")
 }
 
 func enabledChannelModels(channels []model.ModelChannel) []string {
@@ -411,16 +419,22 @@ func repairDefaultModel(current string, models []string, preferred func(string) 
 
 func isVideoModelName(modelName string) bool {
 	name := strings.ToLower(strings.TrimSpace(modelName))
-	return strings.Contains(name, "seedance") || strings.Contains(name, "video")
+	if kind := AutoDLModelKind(modelName); kind != "unsupported" {
+		return kind == "video"
+	}
+	return name == "minimax-h3" || strings.Contains(name, "seedance") || strings.Contains(name, "video") || strings.Contains(name, "sd2.0 720p") || strings.Contains(name, "sd2.5 720p")
 }
 
 func isImageModelName(modelName string) bool {
+	if AutoDLModelKind(modelName) != "unsupported" {
+		return false
+	}
 	name := strings.ToLower(strings.TrimSpace(modelName))
 	return strings.Contains(name, "seedream") || strings.Contains(name, "gpt-image") || strings.Contains(name, "image")
 }
 
 func isTextModelName(modelName string) bool {
-	return !isImageModelName(modelName) && !isVideoModelName(modelName)
+	return AutoDLModelKind(modelName) != "audio" && !isImageModelName(modelName) && !isVideoModelName(modelName)
 }
 
 func normalizeModelChannel(channel model.ModelChannel) model.ModelChannel {
@@ -477,16 +491,16 @@ func resolveAdminChannel(index *int, channel model.ModelChannel) (model.ModelCha
 }
 
 func fetchAdminChannelModels(channel model.ModelChannel) ([]string, error) {
-	if isKIEAdminChannel(channel) {
-		result := kieMarketModels()
-		sort.Strings(result)
-		return result, nil
-	}
+	adapter, _ := matchModelProtocol(modelDiscoveryRules, channel, "")
+	return adapter.models(channel)
+}
+
+func fetchOpenAIAdminChannelModels(channel model.ModelChannel) ([]string, error) {
 	request, err := http.NewRequest(http.MethodGet, BuildModelChannelURL(channel, "/models"), nil)
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+channel.APIKey)
+	SetModelChannelAuthHeader(request, channel)
 	response, err := adminModelHTTPClient.Do(request)
 	if err != nil {
 		return nil, safeMessageError{message: "读取模型失败：上游接口无响应或网络不可达"}
@@ -532,6 +546,7 @@ func kieMarketModels() []string {
 		"seedream/5-lite-image-to-image",
 		"seedream/5-pro-text-to-image",
 		"seedream/5-pro-image-to-image",
+		"seedream/5-pro-layer-decomposition",
 		"z-image",
 		"nano-banana-2",
 		"nano-banana-2-lite",
@@ -545,6 +560,7 @@ func kieMarketModels() []string {
 		"flux-2/pro-text-to-image",
 		"flux-2/flex-image-to-image",
 		"flux-2/flex-text-to-image",
+		"grok-imagine-image-2-0/text-to-image",
 		"grok-imagine/text-to-image",
 		"grok-imagine/image-to-image",
 		"gpt-image/1.5-text-to-image",
@@ -572,6 +588,9 @@ func kieMarketModels() []string {
 		"grok-imagine/upscale",
 		"grok-imagine/extend",
 		"grok-imagine-video-1-5-preview",
+		"minimax-h3/text-to-video",
+		"minimax-h3/image-to-video",
+		"minimax-h3/reference-to-video",
 		"kling-2.6/text-to-video",
 		"kling-2.6/image-to-video",
 		"kling/v2-5-turbo-image-to-video-pro",
@@ -585,6 +604,10 @@ func kieMarketModels() []string {
 		"kling-2.6/motion-control",
 		"kling-3.0/motion-control",
 		"kling-3.0/video",
+		"kling-3.0-omni/text-to-video",
+		"kling-3.0-omni/image-to-video",
+		"kling-3.0-omni/reference-to-video",
+		"kling-3.0-omni/transformation",
 		"kling/v3-turbo-text-to-video",
 		"kling/v3-turbo-image-to-video",
 		"bytedance/seedance-2",
@@ -638,6 +661,11 @@ func testAdminChannelModel(channel model.ModelChannel, modelName string) (string
 	if strings.TrimSpace(modelName) == "" {
 		return "", errors.New("缺少模型名称")
 	}
+	adapter, _ := matchModelProtocol(modelGenerationTestRules, channel, modelName)
+	return adapter.testModel(channel, modelName)
+}
+
+func testOpenAIChannelModel(channel model.ModelChannel, modelName string) (string, error) {
 	body, _ := json.Marshal(map[string]any{
 		"model": modelName,
 		"messages": []map[string]string{{
@@ -670,6 +698,165 @@ func testAdminChannelModel(channel model.ModelChannel, modelName string) (string
 	_ = json.Unmarshal(responseBody, &payload)
 	if len(payload.Choices) > 0 && strings.TrimSpace(payload.Choices[0].Message.Content) != "" {
 		return payload.Choices[0].Message.Content, nil
+	}
+	return "ok", nil
+}
+
+func fetchGeminiAdminChannelModels(channel model.ModelChannel) ([]string, error) {
+	result := []string{}
+	pageToken := ""
+	for {
+		path := "/v1beta/models"
+		if pageToken != "" {
+			path += "?pageToken=" + url.QueryEscape(pageToken)
+		}
+		request, err := http.NewRequest(http.MethodGet, BuildGeminiChannelURL(channel, path), nil)
+		if err != nil {
+			return nil, err
+		}
+		SetModelChannelAuthHeader(request, channel)
+		response, err := adminModelHTTPClient.Do(request)
+		if err != nil {
+			return nil, safeMessageError{message: "读取模型失败：上游接口无响应或网络不可达"}
+		}
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if response.StatusCode >= http.StatusBadRequest {
+			return nil, readAdminChannelError(body, response.StatusCode, "读取模型失败")
+		}
+		var payload struct {
+			Models []struct {
+				Name                       string   `json:"name"`
+				SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
+			} `json:"models"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+		if json.Unmarshal(body, &payload) != nil {
+			return nil, safeMessageError{message: "读取模型失败：上游响应无法解析"}
+		}
+		for _, item := range payload.Models {
+			name := strings.TrimPrefix(strings.TrimSpace(item.Name), "models/")
+			methods := strings.Join(item.SupportedGenerationMethods, ",")
+			if name != "" && !strings.Contains(strings.ToLower(name), "embed") && (strings.Contains(methods, "generateContent") || strings.Contains(methods, "predictLongRunning") || strings.HasPrefix(strings.ToLower(name), "veo-") || strings.HasPrefix(strings.ToLower(name), "imagen-")) {
+				result = append(result, name)
+			}
+		}
+		pageToken = strings.TrimSpace(payload.NextPageToken)
+		if pageToken == "" {
+			break
+		}
+	}
+	seen := map[string]bool{}
+	unique := result[:0]
+	for _, name := range result {
+		if !seen[name] {
+			seen[name] = true
+			unique = append(unique, name)
+		}
+	}
+	result = unique
+	sort.Strings(result)
+	if len(result) == 0 {
+		return nil, safeMessageError{message: "Gemini 模型列表为空"}
+	}
+	return result, nil
+}
+
+func testGeminiChannelModel(channel model.ModelChannel, modelName string) (string, error) {
+	lowerModel := strings.ToLower(strings.TrimSpace(modelName))
+	if strings.HasPrefix(lowerModel, "veo-") || strings.Contains(lowerModel, "image") || strings.Contains(lowerModel, "tts") {
+		return "模型列表与渠道配置有效；图片、视频和语音模型未执行付费生成测试。", nil
+	}
+	body := GeminiTextRequestBody(modelName, "hi")
+	body, _ = StripGeminiModelField(body, "application/json")
+	request, err := http.NewRequest(http.MethodPost, BuildGeminiChannelURL(channel, GeminiModelActionPath(modelName, "generateContent")), strings.NewReader(string(body)))
+	if err != nil {
+		return "", err
+	}
+	SetModelChannelAuthHeader(request, channel)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := adminModelHTTPClient.Do(request)
+	if err != nil {
+		return "", safeMessageError{message: "测试失败：上游接口无响应或网络不可达"}
+	}
+	defer response.Body.Close()
+	responseBody, _ := io.ReadAll(response.Body)
+	if response.StatusCode >= http.StatusBadRequest {
+		return "", readAdminChannelError(responseBody, response.StatusCode, "测试失败")
+	}
+	if text := GeminiResponseText(responseBody); text != "" {
+		return text, nil
+	}
+	return "ok", nil
+}
+
+func testGLMTTSChannelModel(channel model.ModelChannel, modelName string) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"model":           modelName,
+		"input":           "你好，这是语音模型测试。",
+		"voice":           "tongtong",
+		"response_format": "wav",
+		"speed":           1,
+	})
+	request, err := http.NewRequest(http.MethodPost, BuildModelChannelURL(channel, "/audio/speech"), strings.NewReader(string(body)))
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", "Bearer "+channel.APIKey)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := adminModelHTTPClient.Do(request)
+	if err != nil {
+		return "", safeMessageError{message: "测试失败：上游接口无响应或网络不可达"}
+	}
+	defer response.Body.Close()
+	responseBody, _ := io.ReadAll(response.Body)
+	if response.StatusCode >= http.StatusBadRequest {
+		return "", readAdminChannelError(responseBody, response.StatusCode, "测试失败")
+	}
+	if len(responseBody) == 0 {
+		return "", safeMessageError{message: "测试失败：GLM-TTS 未返回音频数据"}
+	}
+	return "ok", nil
+}
+
+func testMiMoTTSChannelModel(channel model.ModelChannel, modelName string) (string, error) {
+	if strings.EqualFold(strings.TrimSpace(modelName), "mimo-v2.5-tts-voiceclone") {
+		return "MiMo VoiceClone 需要画布连接 MP3/WAV 参考音频，后台不发送克隆样本，因此未执行上游生成测试。", nil
+	}
+	messages := []map[string]string{{"role": "assistant", "content": "你好，这是语音模型测试。"}}
+	audio := map[string]any{"format": "wav"}
+	if strings.EqualFold(strings.TrimSpace(modelName), "mimo-v2.5-tts-voicedesign") {
+		messages = append([]map[string]string{{"role": "user", "content": "自然清晰的年轻女声"}}, messages...)
+	} else {
+		audio["voice"] = "冰糖"
+	}
+	body, _ := json.Marshal(map[string]any{"model": modelName, "messages": messages, "audio": audio})
+	request, err := http.NewRequest(http.MethodPost, BuildModelChannelURL(channel, "/chat/completions"), strings.NewReader(string(body)))
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", "Bearer "+channel.APIKey)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := adminModelHTTPClient.Do(request)
+	if err != nil {
+		return "", safeMessageError{message: "测试失败：上游接口无响应或网络不可达"}
+	}
+	defer response.Body.Close()
+	responseBody, _ := io.ReadAll(response.Body)
+	if response.StatusCode >= http.StatusBadRequest {
+		return "", readAdminChannelError(responseBody, response.StatusCode, "测试失败")
+	}
+	var payload struct {
+		Choices []struct {
+			Message struct {
+				Audio *struct {
+					Data string `json:"data"`
+				} `json:"audio"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(responseBody, &payload) != nil || len(payload.Choices) == 0 || payload.Choices[0].Message.Audio == nil || strings.TrimSpace(payload.Choices[0].Message.Audio.Data) == "" {
+		return "", safeMessageError{message: "测试失败：MiMo TTS 未返回音频数据"}
 	}
 	return "ok", nil
 }
@@ -731,11 +918,17 @@ func (err safeMessageError) SafeMessage() string {
 
 func keepPrivateStorageSecrets(settings *model.Settings, saved model.Settings) {
 	for i := range settings.Private.Storage.Providers {
-		if strings.TrimSpace(settings.Private.Storage.Providers[i].SecretAccessKey) != "" {
+		current := &settings.Private.Storage.Providers[i]
+		if strings.TrimSpace(current.SecretAccessKey) != "" && strings.TrimSpace(current.Password) != "" {
 			continue
 		}
-		if provider, ok := findSavedStorageProvider(settings.Private.Storage.Providers[i], saved.Private.Storage.Providers, i); ok {
-			settings.Private.Storage.Providers[i].SecretAccessKey = provider.SecretAccessKey
+		if provider, ok := findSavedStorageProvider(*current, saved.Private.Storage.Providers, i); ok {
+			if strings.TrimSpace(current.SecretAccessKey) == "" {
+				current.SecretAccessKey = provider.SecretAccessKey
+			}
+			if strings.TrimSpace(current.Password) == "" {
+				current.Password = provider.Password
+			}
 		}
 	}
 }
@@ -745,14 +938,34 @@ func findSavedStorageProvider(provider model.StorageProvider, saved []model.Stor
 		if provider.ID != "" && item.ID == provider.ID {
 			return item, true
 		}
-		if item.Name == provider.Name && item.Endpoint == provider.Endpoint && item.Bucket == provider.Bucket {
+		if item.Type == provider.Type && item.Name == provider.Name && item.Endpoint == provider.Endpoint && item.Bucket == provider.Bucket && (provider.Type != model.StorageProviderTypeWebDAV || item.PathPrefix == provider.PathPrefix) {
 			return item, true
 		}
 	}
-	if index >= 0 && index < len(saved) {
+	if index >= 0 && index < len(saved) && saved[index].Type == provider.Type {
 		return saved[index], true
 	}
 	return model.StorageProvider{}, false
+}
+
+func validateEnabledStorageProviderTypes(providers []model.StorageProvider) error {
+	enabledType := ""
+	for _, provider := range providers {
+		if provider.Type != model.StorageProviderTypeS3 && provider.Type != model.StorageProviderTypeWebDAV {
+			return safeMessageError{message: "存储类型不支持"}
+		}
+		if !provider.Enabled {
+			continue
+		}
+		if enabledType == "" {
+			enabledType = provider.Type
+			continue
+		}
+		if enabledType != provider.Type {
+			return safeMessageError{message: "S3/R2 与 WebDAV 不能同时启用"}
+		}
+	}
+	return nil
 }
 
 func normalizePrivateStorageSetting(setting model.PrivateStorageSetting) model.PrivateStorageSetting {
@@ -786,13 +999,21 @@ func normalizeStorageCapacityCheckSetting(setting model.StorageCapacityCheckSett
 
 func normalizeStorageProvider(provider model.StorageProvider) model.StorageProvider {
 	provider.Name = strings.TrimSpace(provider.Name)
+	provider.Type = strings.ToLower(strings.TrimSpace(provider.Type))
+	if provider.Type == "" {
+		provider.Type = model.StorageProviderTypeS3
+	}
 	provider.Endpoint = strings.TrimRight(strings.TrimSpace(provider.Endpoint), "/")
 	provider.Bucket = strings.TrimSpace(provider.Bucket)
 	provider.AccessKeyID = strings.TrimSpace(provider.AccessKeyID)
-	if provider.Type == "" {
-		provider.Type = "s3"
+	if provider.Type == model.StorageProviderTypeWebDAV {
+		provider.PathPrefix = strings.Trim(strings.TrimSpace(provider.PathPrefix), "/")
+		if provider.PathPrefix == "" {
+			provider.PathPrefix = "canvas"
+		}
 	}
-	if provider.Region == "" {
+	provider.Username = strings.TrimSpace(provider.Username)
+	if provider.Type == model.StorageProviderTypeS3 && provider.Region == "" {
 		provider.Region = "auto"
 	}
 	if provider.ID == "" {
@@ -805,7 +1026,11 @@ func normalizeStorageProvider(provider model.StorageProvider) model.StorageProvi
 }
 
 func stableStorageProviderID(provider model.StorageProvider) string {
-	return "storage-" + providerSecureHash([]string{provider.OwnerUserID, provider.Name, provider.Endpoint, provider.Bucket})
+	webDAVPath := ""
+	if provider.Type == model.StorageProviderTypeWebDAV {
+		webDAVPath = provider.PathPrefix
+	}
+	return "storage-" + providerSecureHash([]string{provider.OwnerUserID, provider.Type, provider.Name, provider.Endpoint, provider.Bucket, webDAVPath})
 }
 
 func stableModelChannelID(channel model.ModelChannel) string {
@@ -840,14 +1065,15 @@ func publicChannelInfos(channels []model.ModelChannel) []model.PublicModelChanne
 			continue
 		}
 		result = append(result, model.PublicModelChannelInfo{
-			ID:      channel.ID,
-			Name:    channel.Name,
-			BaseURL: channel.BaseURL,
-			Models:  append([]string{}, channel.Models...),
-			Weight:  channel.Weight,
-			Timeout: channel.Timeout,
-			Enabled: channel.Enabled,
-			Remark:  channel.Remark,
+			ID:       channel.ID,
+			Protocol: channel.Protocol,
+			Name:     channel.Name,
+			BaseURL:  channel.BaseURL,
+			Models:   append([]string{}, channel.Models...),
+			Weight:   channel.Weight,
+			Timeout:  channel.Timeout,
+			Enabled:  channel.Enabled,
+			Remark:   channel.Remark,
 		})
 	}
 	return result

@@ -218,12 +218,16 @@ export function buildNodeChatMessages(context: NodeGenerationContext): ChatCompl
 }
 
 export async function hydrateNodeGenerationContext(context: NodeGenerationContext) {
+    const hydrateImage = async (image: ReferenceImage) => {
+        const url = image.url || (/^https?:\/\//i.test(image.dataUrl) ? image.dataUrl : undefined);
+        return url ? { ...image, url } : { ...image, dataUrl: await imageToDataUrl(image) };
+    };
     const { imageToDataUrl } = await import("@/services/image-storage");
     return {
         ...context,
-        referenceImages: await Promise.all(context.referenceImages.map(async (image) => ({ ...image, dataUrl: await imageToDataUrl(image) }))),
-        firstFrame: context.firstFrame ? { ...context.firstFrame, dataUrl: await imageToDataUrl(context.firstFrame) } : null,
-        lastFrame: context.lastFrame ? { ...context.lastFrame, dataUrl: await imageToDataUrl(context.lastFrame) } : null,
+        referenceImages: await Promise.all(context.referenceImages.map(hydrateImage)),
+        firstFrame: context.firstFrame ? await hydrateImage(context.firstFrame) : null,
+        lastFrame: context.lastFrame ? await hydrateImage(context.lastFrame) : null,
     };
 }
 
@@ -243,7 +247,7 @@ function readReferenceImage(node: CanvasNodeData): ReferenceImage | null {
     if (!isCanvasImageNodeType(node.type) || !node.metadata?.content) return null;
     return {
         id: node.id,
-        name: `${node.title || node.id}.png`,
+        name: `image-${node.id}.png`,
         type: node.metadata.mimeType || "image/png",
         dataUrl: node.metadata.content,
         storageKey: node.metadata.storageKey,
@@ -262,7 +266,7 @@ function readReferenceVideo(node: CanvasNodeData): ReferenceVideo | null {
     if (node.type !== CanvasNodeType.Video || !node.metadata?.content) return null;
     return {
         id: node.id,
-        name: `${node.title || node.id}.mp4`,
+        name: `video-${node.id}.mp4`,
         type: node.metadata.mimeType || "video/mp4",
         url: node.metadata.content,
         storageKey: node.metadata.storageKey,
@@ -277,7 +281,7 @@ function readReferenceAudio(node: CanvasNodeData): ReferenceAudio | null {
     if (node.type !== CanvasNodeType.Audio || !node.metadata?.content) return null;
     return {
         id: node.id,
-        name: `${node.title || node.id}.mp3`,
+        name: `audio-${node.id}.mp3`,
         type: node.metadata.mimeType || "audio/mpeg",
         url: node.metadata.content,
         storageKey: node.metadata.storageKey,
