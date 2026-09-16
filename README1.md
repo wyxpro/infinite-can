@@ -72,7 +72,7 @@
 | 模块/服务类型 | 协议/对接渠道 | 详细功能与模型接入说明 |
 | :--- | :--- | :--- |
 | **图像生成** | OpenAI Compatible `/v1/images/generations` & `/edits` | 文生图、图生图、参考图融合编辑、蒙版编辑、Base64/URL 返回 |
-| **视频生成** | OpenAI Videos / 火山方舟 Ark Seedance / KIE (Kling) / MiniMax / AutoDL / APIMart | 标准与 Agent Plan 双端点；Seedance 2.0 最高 15s、2.5 最高 30s，最多 30 参考图 + 10 参考视频 + 10 参考音频；`1080p`/`4k` 直填分辨率 |
+| **视频生成** | OpenAI Videos / 火山方舟 Ark Seedance / KIE (Kling) / MiniMax / AutoDL / APIMart / Grok2API | 标准与 Agent Plan 双端点；Seedance 2.0 最高 15s、2.5 最高 30s，最多 30 参考图 + 10 参考视频 + 10 参考音频；`1080p`/`4k` 直填分辨率；深度兼容 Grok2API 嵌套视频 URL 轮询解析 |
 | **音频合成 (TTS)** | OpenAI `/v1/audio/speech` / Mimo TTS / Grok TTS / Gemini TTS / MiniMax | 多音色、语速、格式与指令控制，音色列表接口 `/v1/tts/voices` |
 | **智能对话与助手** | OpenAI `/v1/chat/completions` & `/v1/responses` | 画布节点上下文问答、生图/生视频工具调用、工作流脚本生成、长历史压缩为长期检查点 |
 | **Codex 本地代理** | `npx @tigerowo/canvas-agent` + MCP | 画布内切换 Codex 模式，支持模型/推理强度选择、流式回复、授权确认与外部 Codex 插件接入 |
@@ -130,7 +130,7 @@ infinite-canvas/
 
 1. 🎨 **无限 2D 交互画布 (Infinite 2D Canvas)**
    - **多节点编排**：图片、文本、生成配置、全景图、导演台五类节点，支持双击创建菜单、框选多选与节点分组。
-   - **自由度交互**：平移缩放、小地图、三种背景、浅/深主题、复制粘贴、撤销重做 (Undo/Redo)、JSON 导入导出。
+   - **自由度交互**：平移缩放、小地图、三种背景、浅/深主题、复制粘贴、撤销重做 (Undo/Redo)、JSON 导入导出；文本节点支持滚轮平滑滚动浏览长文本；视频节点尺寸自适应初始化。
    - **数据推导**：左右连接点建立上下游依赖，高亮关联链路，流式传递提示词与媒体输入。
    - **媒体清理**：撤销历史保留期内媒体不删除，历史淘汰后自动清理无引用云文件，保留跨画布共享引用。
 
@@ -145,7 +145,7 @@ infinite-canvas/
 
 4. 🤖 **多模态 AIGC 引擎 (Multimodal AI Engine)**
    - **图像**：文生图、图生图、参考图蒙版编辑、多角度变换、裁剪重生成、批量图片组与主图切换。
-   - **视频**：OpenAI 风格与火山方舟 Ark Seedance 双协议；多参考图/视频/音频联合引导，480p~4K 多档位；任务后端持久化，跨设备刷新接管进度。
+   - **视频**：OpenAI 风格与火山方舟 Ark Seedance 双协议；多参考图/视频/音频联合引导，480p~4K 多档位；任务后端持久化，跨设备刷新接管进度；深度适配并解析 Grok2API 等嵌套视频 URL。
    - **音频**：多引擎 TTS (OpenAI / Mimo / Grok / Gemini / MiniMax)，画布音频节点一键朗读。
    - **直连模式**：未登录浏览器直连 OpenAI 兼容接口；登录后渠道配置随账号同步并复用后端转译链路。
 
@@ -155,7 +155,8 @@ infinite-canvas/
    - **Agent Skill**：输入框最多激活 5 个 Skill（系统/账号/本地三级），支持目录与附属 Markdown 文件、管理后台可视化编辑排序，新项目首次创建自动导入内置 Skill 库。
 
 6. 📚 **提示词库与素材沉淀 (Prompt Hub & Asset Manager)**
-   - 自动抓取整合多个 GitHub 开源提示词仓库，按分类标签整理；"我的素材"(本地 IndexedDB) 与"素材库"(云端) 双轨管理，可回填画布与工作流。
+   - 自动抓取整合多个 GitHub 开源提示词仓库，按分类标签整理，标签支持四行滚动限制并适配响应式卡片流。
+   - **素材多维分类沉淀**："我的素材"(本地 IndexedDB) 与"素材库"(云端) 双轨管理，全量支持**分类 (Category)** 与**标签 (Tags)** 双重结构化筛选、分类输入联想；手动添加图片 URL 时在前端借助 `createImageBitmap` 异步嗅探读取真实尺寸、文件大小与 MIME 类型。
    - **创作工作流**：公开/个人模板、变量表单、AI 一键生成工作流草稿、系列图工作流与结果自动入库。
 
 7. ☁️ **云端同步与存储矩阵 (Cloud Sync & Storage)**
@@ -284,7 +285,7 @@ npx -y @tigerowo/canvas-agent@latest mcp      # 作为外部 Codex 的 MCP 入�
 | `GET` | `/api/storage/config` | 公开 | 前台存储能力配置 |
 | `GET` | `/api/files/:id` `/content` · `/api/proxy-image` | 公开 | 文件元信息、内容与图片代理 |
 | `POST` | `/api/anonymous/files` | 匿名存储 | 未登录用户的匿名上传/删除 |
-| `GET` | `/api/prompts` `/api/assets` | 可选 | 公共提示词库与服务器素材列表 |
+| `GET` | `/api/prompts` `/api/assets` | 可选 | 公共提示词库与服务器素材列表（支持分类、标签多维筛选） |
 | `GET` | `/api/agent-skills` `/:id/file` | 公开 | 系统 Skill 列表与附属文件读取 |
 | `POST` | `/api/admin/login` | 公开 | 管理员登录 |
 
@@ -306,7 +307,7 @@ npx -y @tigerowo/canvas-agent@latest mcp      # 作为外部 Codex 的 MCP 入�
 | HTTP Method | API Endpoint | 接口说明 |
 | :--- | :--- | :--- |
 | `GET/POST` | `/v1/canvas/projects` · `/sync` · `/delete` | 画布项目读取、保存、多端时间戳合并同步与批量删除 |
-| `GET/POST` | `/v1/user-data/assets` `/image-history` | 个人素材与生图历史云同步 |
+| `GET/POST` | `/v1/user-data/assets` `/image-history` | 个人素材（含分类、标签与元数据）与生图历史云同步 |
 | `GET/POST/DELETE` | `/v1/generation-logs/images` `/videos` | 图片/视频生成记录同步、批量软删除与清理 |
 | `GET/POST/DELETE` | `/v1/workflows` · `/agent-draft` | 创作工作流管理与 AI 生成工作流草稿 |
 | `GET/POST/DELETE` | `/v1/agent-skills` `/:id` | 用户个人 Agent Skill 管理 |
