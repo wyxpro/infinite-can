@@ -168,12 +168,12 @@ export default function AdminCreditLogsPage() {
                         </Col>
                         <Col span={12}>
                             <Form.Item name="amount" label="变动数量" rules={[{ required: true, message: "请输入变动数量" }]}>
-                                <InputNumber precision={0} style={{ width: "100%" }} />
+                                <InputNumber step={0.01} precision={2} style={{ width: "100%" }} />
                             </Form.Item>
                         </Col>
                         <Col span={12}>
                             <Form.Item name="balance" label="变动后余额" rules={[{ required: true, message: "请输入变动后余额" }]}>
-                                <InputNumber min={0} precision={0} style={{ width: "100%" }} />
+                                <InputNumber min={0} step={0.01} precision={2} style={{ width: "100%" }} />
                             </Form.Item>
                         </Col>
                         <Col span={12}>

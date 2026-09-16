@@ -79,7 +79,7 @@ func SaveUser(user model.User) (model.User, error) {
 	return user, db.Save(&user).Error
 }
 
-func ConsumeUserCredits(id string, credits int, now string) (model.User, bool, error) {
+func ConsumeUserCredits(id string, credits float64, now string) (model.User, bool, error) {
 	db, err := DB()
 	if err != nil {
 		return model.User{}, false, err
@@ -88,8 +88,8 @@ func ConsumeUserCredits(id string, credits int, now string) (model.User, bool, e
 		user, ok, err := GetUserByID(id)
 		return user, ok, err
 	}
-	tx := db.Model(&model.User{}).Where("id = ? AND credits >= ?", id, credits).Updates(map[string]any{
-		"credits":    gorm.Expr("credits - ?", credits),
+	tx := db.Model(&model.User{}).Where("id = ? AND credits >= CAST(? AS DECIMAL(20,2))", id, credits).Updates(map[string]any{
+		"credits":    gorm.Expr("ROUND(credits - CAST(? AS DECIMAL(20,2)), 2)", credits),
 		"updated_at": now,
 	})
 	if tx.Error != nil {
@@ -99,7 +99,7 @@ func ConsumeUserCredits(id string, credits int, now string) (model.User, bool, e
 	return user, ok && tx.RowsAffected > 0, err
 }
 
-func RefundUserCredits(id string, credits int, now string) (model.User, bool, error) {
+func RefundUserCredits(id string, credits float64, now string) (model.User, bool, error) {
 	db, err := DB()
 	if err != nil {
 		return model.User{}, false, err
@@ -109,7 +109,7 @@ func RefundUserCredits(id string, credits int, now string) (model.User, bool, er
 		return user, ok, err
 	}
 	tx := db.Model(&model.User{}).Where("id = ?", id).Updates(map[string]any{
-		"credits":    gorm.Expr("credits + ?", credits),
+		"credits":    gorm.Expr("ROUND(credits + CAST(? AS DECIMAL(20,2)), 2)", credits),
 		"updated_at": now,
 	})
 	if tx.Error != nil {
