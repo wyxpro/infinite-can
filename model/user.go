@@ -94,6 +94,8 @@ type CreditLog struct {
 	Remark    string        `json:"remark"`
 	Extra     string        `json:"extra" gorm:"type:text"`
 	CreatedAt string        `json:"createdAt"`
+
+	UserDisplayName string `json:"userDisplayName" gorm:"->;-:migration"`
 }
 
 type CreditLogList struct {
