@@ -22,7 +22,7 @@ export default function nextConfig(phase: string): NextConfig {
     const releases = parseChangelog(localChangelog);
 
     return {
-        output: "standalone",
+        output: process.env.VERCEL ? undefined : "standalone",
         allowedDevOrigins: isDev ? ["*.*.*.*"] : [],
         typescript: {
             ignoreBuildErrors: true,
