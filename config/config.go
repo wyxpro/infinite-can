@@ -33,6 +33,7 @@ func Load() error {
 		return err
 	}
 	normalizeDockerSQLiteDSN("/app/data")
+	normalizeServerlessPaths()
 	if strings.TrimSpace(Cfg.JWTSecret) == "" || Cfg.JWTSecret == "infinite-canvas" {
 		secret, err := randomSecret()
 		if err != nil {
@@ -68,6 +69,30 @@ func normalizeDockerSQLiteDSN(appDataDir string) {
 		return
 	}
 	Cfg.DatabaseDSN = filepath.Join(filepath.Dir(appDataDir), filepath.FromSlash(slashPath)) + suffix
+}
+
+func normalizeServerlessPaths() {
+	if os.Getenv("VERCEL") == "" && os.Getenv("NOW_REGION") == "" && os.Getenv("AWS_LAMBDA_FUNCTION_NAME") == "" {
+		return
+	}
+	driver := strings.ToLower(strings.TrimSpace(Cfg.StorageDriver))
+	if driver == "" || driver == "sqlite" {
+		dsn := strings.TrimSpace(Cfg.DatabaseDSN)
+		if dsn != "" && dsn != ":memory:" && !strings.HasPrefix(dsn, "file:") {
+			pathPart, suffix := dsn, ""
+			if index := strings.Index(dsn, "?"); index >= 0 {
+				pathPart = dsn[:index]
+				suffix = dsn[index:]
+			}
+			if !filepath.IsAbs(pathPart) || strings.HasPrefix(filepath.ToSlash(pathPart), "data/") {
+				Cfg.DatabaseDSN = filepath.Join(os.TempDir(), filepath.Base(pathPart)) + suffix
+			}
+		}
+	}
+	logDir := strings.TrimSpace(Cfg.AILogDir)
+	if logDir != "" && (!filepath.IsAbs(logDir) || strings.HasPrefix(filepath.ToSlash(logDir), "data/")) {
+		Cfg.AILogDir = filepath.Join(os.TempDir(), "logs", "ai-calls")
+	}
 }
 
 func randomSecret() (string, error) {
