@@ -59,6 +59,9 @@ function build(target: keyof typeof outputs, goos: string, goarch: string) {
     assertBuildOutput(target);
 }
 
+// Vercel 构建环境没有 Go 工具链，bridge 二进制仅自托管部署需要，线上前端直接跳过
+if (process.env.VERCEL) process.exit(0);
+
 if (process.env.CANVAS_PREBUILT_BRIDGE === "1") {
     assertBuildOutput("windows");
     assertBuildOutput("linuxAmd64");
